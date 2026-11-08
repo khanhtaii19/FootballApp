@@ -1,0 +1,154 @@
+// Prisma schema cho Hệ thống đặt sân bóng
+// Mô hình "6 vùng": 2 mặt cỏ (A, B), mỗi mặt 3 vùng
+// Sân 5 = 1 vùng, Sân 7 = 3 vùng cùng mặt cỏ
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Người dùng ───────────────────────────────────────
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  name         String
+  phone        String?
+  role         Role      @default(customer)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  bookings Booking[]
+
+  @@map("users")
+}
+
+enum Role {
+  customer
+  owner
+}
+
+// ─── Vùng sân (6 vùng cố định) ───────────────────────
+
+model Zone {
+  id      String @id @default(cuid())
+  name    String @unique // A1, A2, A3, B1, B2, B3
+  surface String // "A" hoặc "B" (mặt cỏ)
+
+  bookingZones BookingZone[]
+
+  @@map("zones")
+}
+
+// ─── Cấu hình sân (chủ sân chỉnh qua giao diện) ─────
+
+model Setting {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String // JSON string cho các giá trị phức tạp
+
+  @@map("settings")
+}
+
+// Các key dự kiến:
+// - opening_hour: "05:00"
+// - closing_hour: "23:00"
+// - time_step_minutes: "15"
+// - allowed_durations: "[60, 90]"
+// - price_5: "200000"  (VND/giờ)
+// - price_7: "500000"  (VND/giờ)
+// - hold_timeout_minutes: "15"
+// - cancel_before_hours: "24"
+
+// ─── Đặt sân ─────────────────────────────────────────
+
+model Booking {
+  id          String        @id @default(cuid())
+  userId      String        @map("user_id")
+  fieldType   FieldType     @map("field_type") // five hoặc seven
+  startsAt    DateTime      @map("starts_at") @db.Timestamptz
+  endsAt      DateTime      @map("ends_at") @db.Timestamptz
+  status      BookingStatus @default(pending)
+  totalAmount Int           @map("total_amount") // VND, chụp lúc đặt
+  deposit     Int           @default(0) // Tiền cọc
+  paidAt      DateTime?     @map("paid_at") @db.Timestamptz
+  expiresAt   DateTime?     @map("expires_at") @db.Timestamptz // Hạn giữ chỗ
+  note        String?
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+
+  user         User          @relation(fields: [userId], references: [id])
+  bookingZones BookingZone[]
+  payments     Payment[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([startsAt, endsAt])
+  @@map("bookings")
+}
+
+enum FieldType {
+  five
+  seven
+  block // Khóa vùng (bảo trì, mưa) — chiếm 1 vùng
+}
+
+enum BookingStatus {
+  pending
+  confirmed
+  cancelled
+  expired
+  completed
+}
+
+// ─── Booking ↔ Zone (bảng trung gian + constraint chống trùng) ──
+
+model BookingZone {
+  id        String   @id @default(cuid())
+  bookingId String   @map("booking_id")
+  zoneId    String   @map("zone_id")
+  startsAt  DateTime @map("starts_at") @db.Timestamptz // Sao chép từ booking
+  endsAt    DateTime @map("ends_at") @db.Timestamptz   // Sao chép từ booking
+  isActive  Boolean  @default(true) @map("is_active")  // true khi pending/confirmed
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  zone    Zone    @relation(fields: [zoneId], references: [id])
+
+  @@unique([bookingId, zoneId])
+  @@index([zoneId, isActive])
+  @@map("booking_zones")
+}
+
+// ─── Thanh toán ───────────────────────────────────────
+
+model Payment {
+  id            String        @id @default(cuid())
+  bookingId     String        @map("booking_id")
+  amount        Int           // VND
+  method        PaymentMethod
+  status        PaymentStatus @default(pending)
+  transactionId String?       @map("transaction_id") // Mã GD từ bank/payment gateway
+  createdAt     DateTime      @default(now()) @map("created_at")
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+  @@map("payments")
+}
+
+enum PaymentMethod {
+  bank_transfer
+  cash
+  payos
+}
+
+enum PaymentStatus {
+  pending
+  completed
+  refunded
+}

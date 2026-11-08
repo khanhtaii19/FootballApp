@@ -1,0 +1,232 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}</style><style>:root{color-scheme:light dark;--md-bg:#fff;--md-text:rgba(0,0,0,.8);--md-muted:rgba(0,0,0,.6);--md-fill:rgba(0,0,0,.04);--md-fill-strong:rgba(0,0,0,.06);--md-rule:rgba(0,0,0,.1);--md-rule-strong:rgba(0,0,0,.16);--md-link:hsl(210 100% 45%)}@media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){--md-bg:#0d0d0d;--md-text:rgba(255,255,255,.85);--md-muted:rgba(255,255,255,.6);--md-fill:rgba(255,255,255,.06);--md-fill-strong:rgba(255,255,255,.09);--md-rule:rgba(255,255,255,.14);--md-rule-strong:rgba(255,255,255,.22);--md-link:hsl(210 100% 72%)}}:root[data-theme="dark"]{color-scheme:dark;--md-bg:#0d0d0d;--md-text:rgba(255,255,255,.85);--md-muted:rgba(255,255,255,.6);--md-fill:rgba(255,255,255,.06);--md-fill-strong:rgba(255,255,255,.09);--md-rule:rgba(255,255,255,.14);--md-rule-strong:rgba(255,255,255,.22);--md-link:hsl(210 100% 72%)}:root[data-theme="light"]{color-scheme:light}@media print{:root,:root[data-theme="dark"]{color-scheme:light;--md-bg:#fff;--md-text:rgba(0,0,0,.8);--md-muted:rgba(0,0,0,.6);--md-fill:rgba(0,0,0,.04);--md-fill-strong:rgba(0,0,0,.06);--md-rule:rgba(0,0,0,.1);--md-rule-strong:rgba(0,0,0,.16);--md-link:hsl(210 100% 45%)}}body{background:var(--md-bg);color:var(--md-text);max-width:720px;margin:0 auto;padding:32px;display:flex;flex-direction:column;gap:10px;font:14px/1.55 -apple-system,BlinkMacSystemFont,'SF Pro','Segoe UI',sans-serif;overflow-wrap:break-word}body>:first-child{margin-top:0}h1,h2,h3,h4,h5,h6{margin:6px 0 0;line-height:1.25;font-weight:600;text-wrap:balance}h1{font-size:1.35em}h2{font-size:1.15em;color:var(--md-muted)}h3,h4,h5,h6{font-size:1em}p,ul,ol,blockquote,table,pre,hr{margin:0}strong{font-weight:600}a{color:var(--md-link);text-decoration:none}a:hover{text-decoration:underline}ul,ol{display:flex;flex-direction:column;gap:6px;padding-left:22px}ul{list-style:disc}ol{list-style:decimal}:is(li,td,th)>*+:is(p,ul,ol,blockquote){margin-top:6px}blockquote{display:flex;flex-direction:column;gap:10px;border-left:2px solid var(--md-rule);padding-left:10px;color:var(--md-muted)}:not(pre)>code{background:var(--md-fill);padding:1px 3px;border-radius:4px;font:.92em 'SF Mono',ui-monospace,Menlo,Consolas,monospace}a>code{background:none;color:inherit}pre{background:var(--md-fill);padding:10px 12px;border-radius:6px;overflow-x:auto;font:12px/1.5 'SF Mono',ui-monospace,Menlo,Consolas,monospace;margin-block:4px}pre code{background:none;padding:0;font:inherit}table{width:100%;border-collapse:separate;border-spacing:2px;font:inherit}th,td{padding:6px 8px;border-radius:3px;text-align:left;vertical-align:top}th{background:var(--md-fill-strong);font-weight:600}td{background:var(--md-fill)}:is(th,td) :not(pre)>code{background:transparent}hr{border:0;border-top:1px solid var(--md-rule-strong);margin-block:10px}img{max-width:100%;height:auto;border-radius:4px}</style>
+</head><body>
+<h1>Kế hoạch dự án: Hệ thống đặt sân bóng</h1>
+<p><strong>Mục tiêu:</strong> một dự án fullstack đủ mạnh để xin việc intern/fresher năm 2026.
+<strong>Stack:</strong> React + TypeScript (Vite), Node + TypeScript (Express hoặc NestJS), PostgreSQL + Prisma, Docker, GitHub Actions. Thêm sau: Redis + BullMQ.
+<strong>Thời gian dự kiến:</strong> 7-8 tuần.</p>
+<hr>
+<h2>1. Bài toán và mô hình dữ liệu</h2>
+<h3>1.1 Cụm sân</h3>
+<ul>
+<li>2 sân 7 người. Mỗi sân 7 tách hoàn toàn được thành 3 sân 5 người.</li>
+<li>Giờ bắt đầu tự do, mỗi trận 60 hoặc 90 phút.</li>
+<li>Giá như nhau cả tuần; sân 7 đắt hơn sân 5.</li>
+</ul>
+<h3>1.2 Mô hình &quot;6 vùng&quot; (ý tưởng cốt lõi)</h3>
+<p>Đừng coi sân 7 và sân 5 là hai thứ khác nhau. Mỗi mặt cỏ có 3 vùng:</p>
+<pre><code>Sân 7 số 1:  [ A1 | A2 | A3 ]
+Sân 7 số 2:  [ B1 | B2 | B3 ]
+</code></pre>
+<ul>
+<li>Đặt <strong>sân 5</strong> = chiếm <strong>1 vùng</strong>.</li>
+<li>Đặt <strong>sân 7</strong> = chiếm <strong>cả 3 vùng</strong> của một mặt cỏ.</li>
+<li><strong>Quy tắc xung đột duy nhất:</strong> hai booking xung đột khi dùng chung ít nhất một vùng và khoảng thời gian chồng nhau.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Đã có</th>
+<th>Muốn đặt thêm</th>
+<th>Kết quả</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Sân 7 số 1, 18:00-19:00</td>
+<td>Sân 5 vùng A2, 18:30-19:30</td>
+<td>Từ chối (chung vùng A2, giờ chồng)</td>
+</tr>
+<tr>
+<td>Sân 7 số 1, 18:00-19:00</td>
+<td>Sân 5 vùng B1, 18:00-19:00</td>
+<td>Cho phép (khác mặt cỏ)</td>
+</tr>
+<tr>
+<td>Sân 5 vùng A1, 18:00-19:30</td>
+<td>Sân 5 vùng A2, 18:00-19:30</td>
+<td>Cho phép (khác vùng)</td>
+</tr>
+<tr>
+<td>Sân 5 vùng A1, 18:00-19:00</td>
+<td>Sân 5 vùng A1, 19:00-20:00</td>
+<td>Cho phép (nối tiếp, không chồng)</td>
+</tr>
+</tbody>
+</table>
+<h3>1.3 Thời gian và giá</h3>
+<ul>
+<li>Cấu hình giờ mở cửa (ví dụ 05:00-23:00) và bước thời gian (ví dụ 15 phút). Khách chọn ngày, loại sân, thời lượng; hệ thống trả về các giờ bắt đầu còn trống.</li>
+<li>Lưu thời gian dạng <code>timestamptz</code> (UTC), hiển thị theo múi giờ Asia/Ho_Chi_Minh.</li>
+<li>Giá = giá/giờ theo loại sân × số giờ (1 hoặc 1.5). <strong>Chụp giá vào booking lúc đặt</strong> để đổi bảng giá sau này không làm đổi đơn cũ.</li>
+</ul>
+<h3>1.4 Các bảng chính</h3>
+<ul>
+<li><code>users</code>: id, email, mật khẩu băm, vai trò (<code>customer</code> / <code>owner</code>).</li>
+<li><code>zones</code>: 6 vùng (id, tên, mặt cỏ).</li>
+<li><code>settings</code>: giờ mở cửa, bước thời gian, thời lượng cho phép, giá sân 5, giá sân 7, hạn giữ chỗ, chính sách hủy.</li>
+<li><code>bookings</code>: khách, loại sân (5 hoặc 7), bắt đầu, kết thúc, trạng thái (<code>pending</code>, <code>confirmed</code>, <code>cancelled</code>, <code>expired</code>, <code>completed</code>), tổng tiền, tiền cọc, hạn thanh toán.</li>
+<li><code>booking_zones</code>: (booking, vùng), sao chép sẵn <code>starts_at</code>, <code>ends_at</code>, và cờ <code>is_active</code> (true khi booking đang <code>pending</code> hoặc <code>confirmed</code>).</li>
+<li><code>payments</code>, <code>recurring_series</code> (làm ở Phần 7).</li>
+</ul>
+<h3>1.5 Chống trùng ở tầng database</h3>
+<pre><code class="language-sql">CREATE EXTENSION IF NOT EXISTS btree_gist;
+
+ALTER TABLE booking_zones
+ADD CONSTRAINT no_overlap
+EXCLUDE USING gist (
+  zone_id WITH =,
+  tstzrange(starts_at, ends_at) WITH &amp;&amp;
+) WHERE (is_active);
+</code></pre>
+<p>Vì sao cần: nếu chỉ kiểm tra bằng code (&quot;còn trống thì thêm&quot;), hai request đến cùng lúc đều thấy trống rồi cùng thêm, gây trùng lịch (race condition). Constraint ở database là chốt chặn cuối, không thể bị qua mặt. Prisma không tạo được constraint này, nên viết bằng SQL thuần trong file migration. Nhớ cập nhật <code>is_active</code> mỗi khi trạng thái booking đổi.</p>
+<hr>
+<h2>2. Các phần của dự án</h2>
+<h3>Phần 1: Nền tảng (tuần 1)</h3>
+<p><strong>Mục tiêu:</strong> khung dự án chạy được, thiết kế đúng ngay từ đầu.</p>
+<ul>
+<li><input disabled="" type="checkbox"> Repo có <code>client</code> và <code>server</code>, TypeScript, ESLint, Prettier.</li>
+<li><input disabled="" type="checkbox"> Docker Compose chạy Postgres + server bằng một lệnh.</li>
+<li><input disabled="" type="checkbox"> GitHub Actions chạy lint + test mỗi lần push.</li>
+<li><input disabled="" type="checkbox"> Prisma kết nối được DB, có migration đầu tiên.</li>
+<li><input disabled="" type="checkbox"> Viết sơ đồ &quot;6 vùng&quot; và quy tắc xung đột vào tài liệu.</li>
+</ul>
+<p><strong>Xong khi:</strong> <code>docker compose up</code> có backend + DB; push code thì CI xanh.</p>
+<h3>Phần 2: Tài khoản và phân quyền (tuần 1)</h3>
+<p><strong>Mục tiêu:</strong> ai cũng có tài khoản, chỉ làm được việc mình được phép.</p>
+<ul>
+<li><input disabled="" type="checkbox"> Đăng ký, đăng nhập, đăng xuất; JWT access token ngắn hạn + refresh token.</li>
+<li><input disabled="" type="checkbox"> Hai vai trò <code>customer</code> và <code>owner</code>.</li>
+<li><input disabled="" type="checkbox"> Middleware phân quyền ở backend (không chỉ ẩn nút ở frontend).</li>
+<li><input disabled="" type="checkbox"> Băm mật khẩu (bcrypt/argon2), validate input bằng Zod, giới hạn đăng nhập sai.</li>
+</ul>
+<p><strong>Xong khi:</strong> khách gọi API của chủ sân nhận lỗi 403, có test chứng minh.</p>
+<h3>Phần 3: Quản lý sân, giá, cấu hình (tuần 2)</h3>
+<p><strong>Mục tiêu:</strong> chủ sân chỉnh được mọi thứ, không hard-code.</p>
+<ul>
+<li><input disabled="" type="checkbox"> Seed 6 vùng và hai loại đặt (sân 5 = 1 vùng, sân 7 = 3 vùng của một mặt cỏ).</li>
+<li><input disabled="" type="checkbox"> API + giao diện chỉnh giá sân 5, sân 7.</li>
+<li><input disabled="" type="checkbox"> Cấu hình giờ mở cửa, bước thời gian, thời lượng (60/90), hạn giữ chỗ, chính sách hủy.</li>
+<li><input disabled="" type="checkbox"> Chủ sân khóa một vùng trong khoảng thời gian (bảo trì, mưa), thực chất là booking loại &quot;block&quot;.</li>
+</ul>
+<p><strong>Xong khi:</strong> đổi giá hoặc giờ mở cửa qua giao diện mà không sửa code.</p>
+<h3>Phần 4: Lõi đặt sân và chống trùng (tuần 3-4) — quan trọng nhất</h3>
+<p><strong>Mục tiêu:</strong> không bao giờ có hai booking chồng nhau, kể cả khi 100 người bấm cùng lúc.</p>
+<ul>
+<li><input disabled="" type="checkbox"> Migration SQL cho exclusion constraint (mục 1.5).</li>
+<li><input disabled="" type="checkbox"> <strong>API xem giờ trống:</strong> nhận (ngày, loại sân, thời lượng), với mỗi giờ ứng viên theo bước thời gian, kiểm tra các vùng cần thiết có rảnh không.</li>
+<li><input disabled="" type="checkbox"> <strong>API tạo booking:</strong> trong một transaction: chọn vùng phù hợp (sân 5: vùng rảnh; sân 7: 3 vùng của mặt cỏ rảnh), tính và chụp giá, tạo <code>bookings</code> + <code>booking_zones</code>.</li>
+<li><input disabled="" type="checkbox"> Bắt lỗi vi phạm constraint và trả thông báo &quot;vừa có người đặt trước, mời chọn giờ khác&quot;.</li>
+<li><input disabled="" type="checkbox"> API hủy và xác nhận booking (cập nhật <code>is_active</code> đúng).</li>
+<li><input disabled="" type="checkbox"> <strong>Test đồng thời:</strong> nhiều request cùng đặt một giờ, chỉ đúng một cái thành công.</li>
+<li><input disabled="" type="checkbox"> Test cho cả 4 tình huống ở bảng mục 1.2, và các trường hợp biên (đặt qua nửa đêm, đặt ngoài giờ mở cửa, thời lượng không hợp lệ).</li>
+</ul>
+<p><strong>Xong khi:</strong> bộ test đồng thời chạy 100 lần liên tiếp đều xanh.</p>
+<h3>Phần 5: Giữ chỗ tạm, đặt cọc, hủy (tuần 5)</h3>
+<p><strong>Mục tiêu:</strong> luồng tiền và trạng thái đúng thực tế vận hành.</p>
+<ul>
+<li><input disabled="" type="checkbox"> Booking <code>pending</code> vẫn giữ chỗ và có hạn thanh toán (10-15 phút).</li>
+<li><input disabled="" type="checkbox"> Job chạy nền mỗi phút: <code>pending</code> quá hạn chuyển thành <code>expired</code>, nhả vùng.</li>
+<li><input disabled="" type="checkbox"> Khi tạo booking mới, dọn nhanh các booking quá hạn trên vùng đó trong cùng transaction (tránh bị chặn oan bởi booking đã chết mà job chưa quét).</li>
+<li><input disabled="" type="checkbox"> Thanh toán bản đầu: hiển thị QR chuyển khoản, chủ sân bấm &quot;đã nhận cọc&quot; để xác nhận.</li>
+<li><input disabled="" type="checkbox"> Chính sách hủy: hủy trước X giờ thì hoàn cọc, sau đó thì không (X cấu hình được).</li>
+<li><input disabled="" type="checkbox"> Nâng cấp nếu còn thời gian: PayOS/VietQR, nhận webhook, xử lý idempotency (thông báo gửi hai lần không cộng tiền hai lần).</li>
+</ul>
+<p><strong>Xong khi:</strong> đặt sân mà không trả tiền thì sau đúng hạn người khác đặt được giờ đó.</p>
+<h3>Phần 6: Giao diện React (tuần 5-6)</h3>
+<p><strong>Mục tiêu:</strong> dùng tốt trên điện thoại.</p>
+<p><strong>Phía khách:</strong></p>
+<ul>
+<li><input disabled="" type="checkbox"> Luồng chọn ngày → loại sân → thời lượng → giờ trống → xác nhận.</li>
+<li><input disabled="" type="checkbox"> Trang thanh toán: QR + đồng hồ đếm ngược hạn giữ chỗ.</li>
+<li><input disabled="" type="checkbox"> Trang &quot;lịch của tôi&quot;: xem và hủy booking.</li>
+</ul>
+<p><strong>Phía chủ sân:</strong></p>
+<ul>
+<li><input disabled="" type="checkbox"> <strong>Lịch tổng dạng lưới:</strong> cột là 6 vùng, hàng là thời gian, thấy ngay vùng nào bận (màn hình quan trọng nhất khi demo).</li>
+<li><input disabled="" type="checkbox"> Danh sách booking chờ xác nhận, nút xác nhận/hủy.</li>
+<li><input disabled="" type="checkbox"> Dashboard: doanh thu theo ngày/tuần, tỷ lệ lấp đầy.</li>
+<li><input disabled="" type="checkbox"> Trang cấu hình (Phần 3).</li>
+</ul>
+<p>Kỹ thuật cần có: React Query, xử lý loading/lỗi, form có validate, responsive.</p>
+<p><strong>Xong khi:</strong> người lạ mở link trên điện thoại và đặt được sân mà không cần hướng dẫn.</p>
+<h3>Phần 7: Đặt cố định hàng tuần và thông báo (tuần 7)</h3>
+<p><strong>Mục tiêu:</strong> phục vụ nhóm đá đều đặn.</p>
+<ul>
+<li><input disabled="" type="checkbox"> Chuỗi định kỳ (&quot;mỗi thứ Năm 19:00-20:30, sân 7 số 1&quot;): job sinh sẵn booking cho khoảng 4 tuần tới; mỗi tuần là một booking riêng, đi qua cùng constraint.</li>
+<li><input disabled="" type="checkbox"> Tuần bị trùng (ví dụ chủ khóa bảo trì): báo cho chủ và khách, không im lặng bỏ qua.</li>
+<li><input disabled="" type="checkbox"> Khách bỏ một tuần cụ thể hoặc hủy cả chuỗi.</li>
+<li><input disabled="" type="checkbox"> Email thông báo: đặt thành công, sắp đến giờ, bị hủy, gửi qua hàng đợi (BullMQ + Redis).</li>
+</ul>
+<p><strong>Xong khi:</strong> tạo chuỗi 4 tuần thấy đủ 4 booking, kể cả khi một tuần bị chặn.</p>
+<h3>Phần 8: Chất lượng, deploy, người dùng thật (tuần 7-8)</h3>
+<p><strong>Mục tiêu:</strong> biến đồ án thành sản phẩm.</p>
+<ul>
+<li><input disabled="" type="checkbox"> Deploy có domain + HTTPS, biến môi trường, backup database.</li>
+<li><input disabled="" type="checkbox"> Log có cấu trúc; giám sát cơ bản (ví dụ Sentry bản miễn phí).</li>
+<li><input disabled="" type="checkbox"> Test: unit (giờ trống, giá), integration (API), đồng thời (Phần 4).</li>
+<li><input disabled="" type="checkbox"> Bảo mật: rate limit, CORS, validate mọi input, không lộ lỗi nội bộ.</li>
+<li><input disabled="" type="checkbox"> Tài khoản demo + dữ liệu mẫu để nhà tuyển dụng tự thử.</li>
+<li><input disabled="" type="checkbox"> README: sơ đồ 6 vùng, sơ đồ kiến trúc, lý do chọn constraint ở Postgres, kết quả test đồng thời, ảnh chụp màn hình, link demo.</li>
+<li><input disabled="" type="checkbox"> Cho 1-2 chủ sân hoặc một nhóm bạn dùng thật; ghi lại feedback và số liệu (số booking, số người dùng).</li>
+</ul>
+<hr>
+<h2>3. Lịch trình</h2>
+<table>
+<thead>
+<tr>
+<th>Tuần</th>
+<th>Nội dung</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Phần 1 + Phần 2</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Phần 3 + thiết kế kỹ schema Phần 4</td>
+</tr>
+<tr>
+<td>3-4</td>
+<td>Phần 4 (dành nhiều thời gian nhất)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Phần 5 + bắt đầu Phần 6</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Hoàn thiện Phần 6</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Phần 7 + bắt đầu Phần 8</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Deploy, người dùng thật, README</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Nếu bị trễ:</strong> cắt Phần 7 và thanh toán tự động trước. Tuyệt đối không cắt Phần 4 và bộ test. Một bản nhỏ nhưng lõi vững mạnh hơn bản nhiều tính năng mà lõi yếu.</p>
+<hr>
+<h2>4. Thế nào là &quot;hoàn chỉnh&quot;</h2>
+<ul>
+<li>Khách đặt được sân trên điện thoại; chủ sân quản lý bằng lịch tổng.</li>
+<li>Không thể đặt trùng, có test chứng minh.</li>
+<li>Đặt không trả tiền thì tự nhả chỗ.</li>
+<li>Chạy trên internet thật, có vài người dùng thật.</li>
+<li>Repo có README kể lại được câu chuyện kỹ thuật.</li>
+</ul>
+<h2>5. Câu chuyện để kể khi phỏng vấn</h2>
+<ol>
+<li><strong>Bài toán:</strong> sân 7 ghép từ 3 sân 5, làm sao không đặt trùng?</li>
+<li><strong>Ý tưởng:</strong> mô hình 6 vùng, một quy tắc xung đột duy nhất.</li>
+<li><strong>Vì sao kiểm tra bằng code không đủ:</strong> race condition khi nhiều người đặt cùng lúc.</li>
+<li><strong>Giải pháp:</strong> exclusion constraint của Postgres làm chốt chặn cuối.</li>
+<li><strong>Bằng chứng:</strong> test đồng thời, chạy 100 lần vẫn đúng.</li>
+<li><strong>Kết quả thật:</strong> số người dùng và booking thực tế, feedback từ chủ sân.</li>
+</ol>
+
+</body></html>

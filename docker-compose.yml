@@ -1,0 +1,57 @@
+# Docker Compose cho Hệ thống đặt sân bóng
+# Chạy: docker compose up -d
+# Dừng: docker compose down
+
+services:
+  # ─── PostgreSQL ──────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: sanbong-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sanbong
+      POSTGRES_PASSWORD: sanbong_secret
+      POSTGRES_DB: sanbong
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U sanbong" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── Backend (dev mode - dùng source mount) ─────
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+      target: deps # Chỉ build tới stage deps cho dev
+    container_name: sanbong-server
+    restart: unless-stopped
+    working_dir: /app
+    command: >
+      sh -c "
+        npx prisma migrate deploy &&
+        npx prisma db seed &&
+        npx tsx watch src/index.ts
+      "
+    environment:
+      DATABASE_URL: postgresql://sanbong:sanbong_secret@db:5432/sanbong?schema=public
+      PORT: 3000
+      NODE_ENV: development
+      CLIENT_URL: http://localhost:5173
+      JWT_SECRET: dev-secret-change-in-production
+      JWT_REFRESH_SECRET: dev-refresh-secret-change-in-production
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./server:/app
+      - /app/node_modules # Giữ node_modules trong container
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

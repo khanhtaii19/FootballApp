@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ─── Lint & Type check ─────────────────────────────
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Generate Prisma Client
+        working-directory: server
+        run: npx prisma generate
+
+      - name: Lint
+        working-directory: server
+        run: npm run lint
+
+      - name: Type Check
+        working-directory: server
+        run: npx tsc --noEmit
+
+      - name: Format Check
+        working-directory: server
+        run: npm run format:check
+
+  # ─── Tests ──────────────────────────────────────────
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sanbong
+          POSTGRES_PASSWORD: sanbong_secret
+          POSTGRES_DB: sanbong_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Generate Prisma Client
+        working-directory: server
+        run: npx prisma generate
+
+      - name: Run migrations
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://sanbong:sanbong_secret@localhost:5432/sanbong_test?schema=public
+        run: npx prisma migrate deploy
+
+      - name: Seed database
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://sanbong:sanbong_secret@localhost:5432/sanbong_test?schema=public
+        run: npx prisma db seed
+
+      - name: Run tests
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://sanbong:sanbong_secret@localhost:5432/sanbong_test?schema=public
+          JWT_SECRET: test-secret
+          JWT_REFRESH_SECRET: test-refresh-secret
+          NODE_ENV: test
+        run: npm test
