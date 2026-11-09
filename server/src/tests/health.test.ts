@@ -43,12 +43,8 @@ describe("Health Check", () => {
 
   it("should detect zone conflicts correctly", () => {
     // Test logic xung đột: 2 booking chồng khi dùng chung vùng VÀ thời gian chồng
-    const hasTimeOverlap = (
-      start1: number,
-      end1: number,
-      start2: number,
-      end2: number
-    ) => start1 < end2 && start2 < end1;
+    const hasTimeOverlap = (start1: number, end1: number, start2: number, end2: number) =>
+      start1 < end2 && start2 < end1;
 
     const hasZoneConflict = (zones1: string[], zones2: string[]) =>
       zones1.some((z) => zones2.includes(z));

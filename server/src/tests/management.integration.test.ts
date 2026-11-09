@@ -1,24 +1,11 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import request from "supertest";
 import app from "../app.js";
 import { generateTokens } from "../lib/jwt.js";
 import prisma from "../lib/prisma.js";
-import {
-  createUserWithRole,
-  resetBookingData,
-  resetUsers,
-} from "./helpers/test-db.js";
+import { createUserWithRole, resetBookingData, resetUsers } from "./helpers/test-db.js";
 
-async function canReachDatabase() {
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const describeDb = (await canReachDatabase()) ? describe : describe.skip;
+const describeDb = await getDescribeDb();
 
 describeDb("Settings, zones & blocks (integration)", () => {
   beforeAll(async () => {
@@ -50,10 +37,7 @@ describeDb("Settings, zones & blocks (integration)", () => {
   it("allows owner to update settings, denies customer", async () => {
     const suffix = `${Date.now()}`;
     const { user: owner } = await createUserWithRole("owner", `o-${suffix}`);
-    const { user: customer } = await createUserWithRole(
-      "customer",
-      `c-${suffix}`
-    );
+    const { user: customer } = await createUserWithRole("customer", `c-${suffix}`);
 
     const ownerToken = generateTokens({
       userId: owner.id,
@@ -92,9 +76,7 @@ describeDb("Settings, zones & blocks (integration)", () => {
     }).accessToken;
 
     const zonesRes = await request(app).get("/api/zones").expect(200);
-    const zoneA1 = zonesRes.body.zones.find(
-      (z: { name: string }) => z.name === "A1"
-    );
+    const zoneA1 = zonesRes.body.zones.find((z: { name: string }) => z.name === "A1");
 
     const startsAt = "2026-12-01T11:00:00.000Z";
     const endsAt = "2026-12-01T12:00:00.000Z";
