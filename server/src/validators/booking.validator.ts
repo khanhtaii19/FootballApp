@@ -3,9 +3,7 @@ import { z } from "zod";
 // ─── Xem giờ trống ───────────────────────────────────
 
 export const availableSlotsQuerySchema = z.object({
-  date: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/, "Ngày phải dạng YYYY-MM-DD"),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Ngày phải dạng YYYY-MM-DD"),
   fieldType: z.enum(["five", "seven"], {
     errorMap: () => ({ message: "Loại sân phải là 'five' hoặc 'seven'" }),
   }),
