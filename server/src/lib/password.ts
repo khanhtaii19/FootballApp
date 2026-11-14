@@ -12,9 +12,6 @@ export async function hashPassword(password: string): Promise<string> {
 /**
  * So sánh mật khẩu với bản băm
  */
-export async function comparePassword(
-  password: string,
-  hash: string
-): Promise<boolean> {
+export async function comparePassword(password: string, hash: string): Promise<boolean> {
   return bcrypt.compare(password, hash);
 }

@@ -3,11 +3,9 @@ import { verifyAccessToken, type TokenPayload } from "../lib/jwt.js";
 
 // ─── Mở rộng Express Request để có user info ────────
 
-declare global {
-  namespace Express {
-    interface Request {
-      user?: TokenPayload;
-    }
+declare module "express-serve-static-core" {
+  interface Request {
+    user?: TokenPayload;
   }
 }
 
