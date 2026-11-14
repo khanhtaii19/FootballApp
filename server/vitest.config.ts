@@ -13,6 +13,9 @@ export default defineConfig({
     // Các file integration dùng chung một DB và tự xóa dữ liệu,
     // chạy song song sẽ xóa dữ liệu của nhau.
     fileParallelism: false,
+    // Runner CI chậm và test đồng thời cần dư thời gian
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     coverage: {
       reporter: ["text", "lcov"],
     },

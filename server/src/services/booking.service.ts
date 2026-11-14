@@ -2,6 +2,7 @@ import type { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma.js";
 import { getAppSettings } from "./settings.service.js";
 import { isOverlapConstraintError } from "../lib/db-errors.js";
+import { lockBookingCreation } from "../lib/db-locks.js";
 import {
   vietnamToUtc,
   minutesToTime,
@@ -214,82 +215,89 @@ export async function createBooking(userId: string, input: CreateBookingInput) {
   throw new BookingError("Vừa có người đặt trước, mời chọn giờ khác", 409);
 
   function tryCreateBooking() {
-    return prisma.$transaction(async (tx) => {
-      // Tìm booking_zones active chồng thời gian
-      const busy = await tx.bookingZone.findMany({
-        where: {
-          isActive: true,
-          startsAt: { lt: endsAt },
-          endsAt: { gt: startsAt },
-        },
-        select: { zoneId: true },
-      });
-      const busyZoneIds = new Set(busy.map((b) => b.zoneId));
+    return prisma.$transaction(
+      async (tx) => {
+        // Xếp hàng: chỉ một transaction được chọn vùng và ghi tại một thời điểm
+        await lockBookingCreation(tx);
 
-      // Chọn vùng
-      let selectedZoneIds: string[];
+        // Tìm booking_zones active chồng thời gian
+        const busy = await tx.bookingZone.findMany({
+          where: {
+            isActive: true,
+            startsAt: { lt: endsAt },
+            endsAt: { gt: startsAt },
+          },
+          select: { zoneId: true },
+        });
+        const busyZoneIds = new Set(busy.map((b) => b.zoneId));
 
-      if (input.fieldType === "five") {
-        // Tìm bất kỳ vùng rảnh nào
-        const freeZone = zones.find((z) => !busyZoneIds.has(z.id));
-        if (!freeZone) {
-          throw new BookingError("Không còn sân 5 trống trong khung giờ này", 409);
-        }
-        selectedZoneIds = [freeZone.id];
-      } else {
-        // Tìm mặt cỏ rảnh (cả 3 vùng phải free)
-        let freeSurfaceZones: typeof zones | null = null;
-        for (const surface of ["A", "B"]) {
-          const surfaceZones = zones.filter((z) => z.surface === surface);
-          const allFree = surfaceZones.every((z) => !busyZoneIds.has(z.id));
-          if (allFree) {
-            freeSurfaceZones = surfaceZones;
-            break;
+        // Chọn vùng
+        let selectedZoneIds: string[];
+
+        if (input.fieldType === "five") {
+          // Tìm bất kỳ vùng rảnh nào
+          const freeZone = zones.find((z) => !busyZoneIds.has(z.id));
+          if (!freeZone) {
+            throw new BookingError("Không còn sân 5 trống trong khung giờ này", 409);
           }
+          selectedZoneIds = [freeZone.id];
+        } else {
+          // Tìm mặt cỏ rảnh (cả 3 vùng phải free)
+          let freeSurfaceZones: typeof zones | null = null;
+          for (const surface of ["A", "B"]) {
+            const surfaceZones = zones.filter((z) => z.surface === surface);
+            const allFree = surfaceZones.every((z) => !busyZoneIds.has(z.id));
+            if (allFree) {
+              freeSurfaceZones = surfaceZones;
+              break;
+            }
+          }
+          if (!freeSurfaceZones) {
+            throw new BookingError("Không còn sân 7 trống trong khung giờ này", 409);
+          }
+          selectedZoneIds = freeSurfaceZones.map((z) => z.id);
         }
-        if (!freeSurfaceZones) {
-          throw new BookingError("Không còn sân 7 trống trong khung giờ này", 409);
-        }
-        selectedZoneIds = freeSurfaceZones.map((z) => z.id);
-      }
 
-      // Tạo booking
-      const booking = await tx.booking.create({
-        data: {
-          userId,
-          fieldType: input.fieldType,
-          startsAt,
-          endsAt,
-          status: "pending",
-          totalAmount,
-          expiresAt,
-          note: input.note,
-        },
-      });
+        // Tạo booking
+        const booking = await tx.booking.create({
+          data: {
+            userId,
+            fieldType: input.fieldType,
+            startsAt,
+            endsAt,
+            status: "pending",
+            totalAmount,
+            expiresAt,
+            note: input.note,
+          },
+        });
 
-      // Tạo booking_zones (chốt chặn cuối = exclusion constraint)
-      await tx.bookingZone.createMany({
-        data: selectedZoneIds.map((zoneId) => ({
-          bookingId: booking.id,
-          zoneId,
-          startsAt,
-          endsAt,
-          isActive: true,
-        })),
-      });
+        // Tạo booking_zones (chốt chặn cuối = exclusion constraint)
+        await tx.bookingZone.createMany({
+          data: selectedZoneIds.map((zoneId) => ({
+            bookingId: booking.id,
+            zoneId,
+            startsAt,
+            endsAt,
+            isActive: true,
+          })),
+        });
 
-      // Trả về booking đầy đủ
-      return tx.booking.findUniqueOrThrow({
-        where: { id: booking.id },
-        include: {
-          bookingZones: {
-            include: {
-              zone: { select: { id: true, name: true, surface: true } },
+        // Trả về booking đầy đủ
+        return tx.booking.findUniqueOrThrow({
+          where: { id: booking.id },
+          include: {
+            bookingZones: {
+              include: {
+                zone: { select: { id: true, name: true, surface: true } },
+              },
             },
           },
-        },
-      });
-    });
+        });
+      },
+      // Chờ khóa xếp hàng có thể lâu hơn mặc định (2s/5s) khi runner chậm
+      { maxWait: 15_000, timeout: 20_000 }
+    );
   }
 }
 
