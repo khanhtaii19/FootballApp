@@ -2,7 +2,7 @@ import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import request from "supertest";
 import app from "../app.js";
 import { generateTokens } from "../lib/jwt.js";
-import { createUserWithRole, resetUsers } from "./helpers/test-db.js";
+import { createUserWithRole, getDescribeDb, resetUsers } from "./helpers/test-db.js";
 
 const describeDb = await getDescribeDb();
 

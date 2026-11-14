@@ -3,7 +3,7 @@ import request from "supertest";
 import app from "../app.js";
 import { generateTokens } from "../lib/jwt.js";
 import prisma from "../lib/prisma.js";
-import { createUserWithRole, resetBookingData, resetUsers } from "./helpers/test-db.js";
+import { createUserWithRole,getDescribeDb, resetBookingData, resetUsers } from "./helpers/test-db.js";
 
 const describeDb = await getDescribeDb();
 
