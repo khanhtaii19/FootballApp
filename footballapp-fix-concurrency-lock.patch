@@ -1,0 +1,252 @@
+From f37a567ca32c8c30e718920e330798c303ed9ffe Mon Sep 17 00:00:00 2001
+From: Dev <dev@example.com>
+Date: Sat, 14 Nov 2026 06:31:50 +0000
+Subject: [PATCH] fix(booking): serialize booking creation with an advisory
+ lock and relax test timeouts
+
+Concurrent multi-row inserts racing on the no_overlap exclusion constraint
+could stall the seven-a-side concurrency test in CI. Booking and block
+creation now take a transaction-level advisory lock first, so only one
+transaction picks zones at a time; the constraint remains the final guard.
+Also raise Prisma transaction maxWait/timeout and Vitest test/hook timeouts.
+---
+ server/src/lib/db-locks.ts             |  17 +++
+ server/src/services/blocks.service.ts  |   2 +
+ server/src/services/booking.service.ts | 150 +++++++++++++------------
+ server/vitest.config.ts                |   3 +
+ 4 files changed, 101 insertions(+), 71 deletions(-)
+ create mode 100644 server/src/lib/db-locks.ts
+
+diff --git a/server/src/lib/db-locks.ts b/server/src/lib/db-locks.ts
+new file mode 100644
+index 0000000..5307881
+--- /dev/null
++++ b/server/src/lib/db-locks.ts
+@@ -0,0 +1,17 @@
++import type { Prisma } from "@prisma/client";
++
++// Khóa tư vấn (advisory lock) dùng chung cho mọi thao tác ghi vào lịch sân.
++const BOOKING_LOCK_KEY = 7420001;
++
++/**
++ * Xếp hàng các transaction tạo booking/block: transaction sau chờ transaction
++ * trước commit xong rồi mới đọc vùng bận. Nhờ vậy các transaction không tranh
++ * nhau khóa ở exclusion constraint (dễ chờ lẫn nhau khi tải đồng thời).
++ * Khóa tự nhả khi transaction commit hoặc rollback. Exclusion constraint
++ * `no_overlap` vẫn là chốt chặn cuối cùng nếu có đường ghi nào bỏ qua khóa này.
++ *
++ * Dùng SELECT trả về cột int thay vì `void` để Prisma đọc kết quả được.
++ */
++export async function lockBookingCreation(tx: Prisma.TransactionClient) {
++  await tx.$queryRaw`SELECT 1 AS locked FROM (SELECT pg_advisory_xact_lock(${BOOKING_LOCK_KEY}::bigint)) AS l`;
++}
+diff --git a/server/src/services/blocks.service.ts b/server/src/services/blocks.service.ts
+index d011ddf..9d58851 100644
+--- a/server/src/services/blocks.service.ts
++++ b/server/src/services/blocks.service.ts
+@@ -1,6 +1,7 @@
+ import prisma from "../lib/prisma.js";
+ import { findActiveZoneOverlap } from "../lib/zone-overlap.js";
+ import { isOverlapConstraintError } from "../lib/db-errors.js";
++import { lockBookingCreation } from "../lib/db-locks.js";
+ import type { CreateBlockInput } from "../validators/blocks.validator.js";
+ 
+ export class BlockError extends Error {
+@@ -46,6 +47,7 @@ export async function createBlock(ownerId: string, input: CreateBlockInput) {
+ 
+   try {
+     return await prisma.$transaction(async (tx) => {
++      await lockBookingCreation(tx);
+       const booking = await tx.booking.create({
+         data: {
+           userId: ownerId,
+diff --git a/server/src/services/booking.service.ts b/server/src/services/booking.service.ts
+index 394292d..6949296 100644
+--- a/server/src/services/booking.service.ts
++++ b/server/src/services/booking.service.ts
+@@ -2,6 +2,7 @@ import type { Prisma } from "@prisma/client";
+ import prisma from "../lib/prisma.js";
+ import { getAppSettings } from "./settings.service.js";
+ import { isOverlapConstraintError } from "../lib/db-errors.js";
++import { lockBookingCreation } from "../lib/db-locks.js";
+ import {
+   vietnamToUtc,
+   minutesToTime,
+@@ -214,82 +215,89 @@ export async function createBooking(userId: string, input: CreateBookingInput) {
+   throw new BookingError("Vừa có người đặt trước, mời chọn giờ khác", 409);
+ 
+   function tryCreateBooking() {
+-    return prisma.$transaction(async (tx) => {
+-      // Tìm booking_zones active chồng thời gian
+-      const busy = await tx.bookingZone.findMany({
+-        where: {
+-          isActive: true,
+-          startsAt: { lt: endsAt },
+-          endsAt: { gt: startsAt },
+-        },
+-        select: { zoneId: true },
+-      });
+-      const busyZoneIds = new Set(busy.map((b) => b.zoneId));
+-
+-      // Chọn vùng
+-      let selectedZoneIds: string[];
+-
+-      if (input.fieldType === "five") {
+-        // Tìm bất kỳ vùng rảnh nào
+-        const freeZone = zones.find((z) => !busyZoneIds.has(z.id));
+-        if (!freeZone) {
+-          throw new BookingError("Không còn sân 5 trống trong khung giờ này", 409);
+-        }
+-        selectedZoneIds = [freeZone.id];
+-      } else {
+-        // Tìm mặt cỏ rảnh (cả 3 vùng phải free)
+-        let freeSurfaceZones: typeof zones | null = null;
+-        for (const surface of ["A", "B"]) {
+-          const surfaceZones = zones.filter((z) => z.surface === surface);
+-          const allFree = surfaceZones.every((z) => !busyZoneIds.has(z.id));
+-          if (allFree) {
+-            freeSurfaceZones = surfaceZones;
+-            break;
++    return prisma.$transaction(
++      async (tx) => {
++        // Xếp hàng: chỉ một transaction được chọn vùng và ghi tại một thời điểm
++        await lockBookingCreation(tx);
++
++        // Tìm booking_zones active chồng thời gian
++        const busy = await tx.bookingZone.findMany({
++          where: {
++            isActive: true,
++            startsAt: { lt: endsAt },
++            endsAt: { gt: startsAt },
++          },
++          select: { zoneId: true },
++        });
++        const busyZoneIds = new Set(busy.map((b) => b.zoneId));
++
++        // Chọn vùng
++        let selectedZoneIds: string[];
++
++        if (input.fieldType === "five") {
++          // Tìm bất kỳ vùng rảnh nào
++          const freeZone = zones.find((z) => !busyZoneIds.has(z.id));
++          if (!freeZone) {
++            throw new BookingError("Không còn sân 5 trống trong khung giờ này", 409);
+           }
++          selectedZoneIds = [freeZone.id];
++        } else {
++          // Tìm mặt cỏ rảnh (cả 3 vùng phải free)
++          let freeSurfaceZones: typeof zones | null = null;
++          for (const surface of ["A", "B"]) {
++            const surfaceZones = zones.filter((z) => z.surface === surface);
++            const allFree = surfaceZones.every((z) => !busyZoneIds.has(z.id));
++            if (allFree) {
++              freeSurfaceZones = surfaceZones;
++              break;
++            }
++          }
++          if (!freeSurfaceZones) {
++            throw new BookingError("Không còn sân 7 trống trong khung giờ này", 409);
++          }
++          selectedZoneIds = freeSurfaceZones.map((z) => z.id);
+         }
+-        if (!freeSurfaceZones) {
+-          throw new BookingError("Không còn sân 7 trống trong khung giờ này", 409);
+-        }
+-        selectedZoneIds = freeSurfaceZones.map((z) => z.id);
+-      }
+ 
+-      // Tạo booking
+-      const booking = await tx.booking.create({
+-        data: {
+-          userId,
+-          fieldType: input.fieldType,
+-          startsAt,
+-          endsAt,
+-          status: "pending",
+-          totalAmount,
+-          expiresAt,
+-          note: input.note,
+-        },
+-      });
+-
+-      // Tạo booking_zones (chốt chặn cuối = exclusion constraint)
+-      await tx.bookingZone.createMany({
+-        data: selectedZoneIds.map((zoneId) => ({
+-          bookingId: booking.id,
+-          zoneId,
+-          startsAt,
+-          endsAt,
+-          isActive: true,
+-        })),
+-      });
+-
+-      // Trả về booking đầy đủ
+-      return tx.booking.findUniqueOrThrow({
+-        where: { id: booking.id },
+-        include: {
+-          bookingZones: {
+-            include: {
+-              zone: { select: { id: true, name: true, surface: true } },
++        // Tạo booking
++        const booking = await tx.booking.create({
++          data: {
++            userId,
++            fieldType: input.fieldType,
++            startsAt,
++            endsAt,
++            status: "pending",
++            totalAmount,
++            expiresAt,
++            note: input.note,
++          },
++        });
++
++        // Tạo booking_zones (chốt chặn cuối = exclusion constraint)
++        await tx.bookingZone.createMany({
++          data: selectedZoneIds.map((zoneId) => ({
++            bookingId: booking.id,
++            zoneId,
++            startsAt,
++            endsAt,
++            isActive: true,
++          })),
++        });
++
++        // Trả về booking đầy đủ
++        return tx.booking.findUniqueOrThrow({
++          where: { id: booking.id },
++          include: {
++            bookingZones: {
++              include: {
++                zone: { select: { id: true, name: true, surface: true } },
++              },
+             },
+           },
+-        },
+-      });
+-    });
++        });
++      },
++      // Chờ khóa xếp hàng có thể lâu hơn mặc định (2s/5s) khi runner chậm
++      { maxWait: 15_000, timeout: 20_000 }
++    );
+   }
+ }
+ 
+diff --git a/server/vitest.config.ts b/server/vitest.config.ts
+index 3d32af3..a2fd816 100644
+--- a/server/vitest.config.ts
++++ b/server/vitest.config.ts
+@@ -13,6 +13,9 @@ export default defineConfig({
+     // Các file integration dùng chung một DB và tự xóa dữ liệu,
+     // chạy song song sẽ xóa dữ liệu của nhau.
+     fileParallelism: false,
++    // Runner CI chậm và test đồng thời cần dư thời gian
++    testTimeout: 30_000,
++    hookTimeout: 30_000,
+     coverage: {
+       reporter: ["text", "lcov"],
+     },
+-- 
+2.43.0
+

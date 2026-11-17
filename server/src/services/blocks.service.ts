@@ -1,5 +1,10 @@
 import prisma from "../lib/prisma.js";
 import { findActiveZoneOverlap } from "../lib/zone-overlap.js";
+<<<<<<< HEAD
+=======
+import { isOverlapConstraintError } from "../lib/db-errors.js";
+import { lockBookingCreation } from "../lib/db-locks.js";
+>>>>>>> fix(booking): serialize booking creation with an advisory lock and relax test timeouts
 import type { CreateBlockInput } from "../validators/blocks.validator.js";
 
 export class BlockError extends Error {
@@ -43,6 +48,7 @@ export async function createBlock(ownerId: string, input: CreateBlockInput) {
     );
   }
 
+<<<<<<< HEAD
   return prisma.$transaction(async (tx) => {
     const booking = await tx.booking.create({
       data: {
@@ -55,6 +61,42 @@ export async function createBlock(ownerId: string, input: CreateBlockInput) {
         deposit: 0,
         note: input.note,
       },
+=======
+  try {
+    return await prisma.$transaction(async (tx) => {
+      await lockBookingCreation(tx);
+      const booking = await tx.booking.create({
+        data: {
+          userId: ownerId,
+          fieldType: "block",
+          startsAt,
+          endsAt,
+          status: "confirmed",
+          totalAmount: 0,
+          deposit: 0,
+          note: input.note,
+        },
+      });
+
+      await tx.bookingZone.create({
+        data: {
+          bookingId: booking.id,
+          zoneId: zone.id,
+          startsAt,
+          endsAt,
+          isActive: true,
+        },
+      });
+
+      return tx.booking.findUniqueOrThrow({
+        where: { id: booking.id },
+        include: {
+          bookingZones: {
+            include: { zone: { select: { id: true, name: true, surface: true } } },
+          },
+        },
+      });
+>>>>>>> fix(booking): serialize booking creation with an advisory lock and relax test timeouts
     });
 
     await tx.bookingZone.create({

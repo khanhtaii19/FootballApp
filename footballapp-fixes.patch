@@ -1,0 +1,1117 @@
+From ab5a68ad408e1bd6458db2e5155d23f82bb10d70 Mon Sep 17 00:00:00 2001
+From: Dev <dev@example.com>
+Date: Mon, 9 Nov 2026 16:39:19 +0000
+Subject: [PATCH 1/3] fix(booking): retry zone selection on overlap so
+ concurrent bookings are not rejected wrongly
+
+When several requests pick the same free zone, only one wins the
+no_overlap exclusion constraint. Losers now re-read busy zones in a new
+transaction and pick another zone instead of returning 409 immediately.
+Also map the block-creation race to 409 and stop treating P2002 as overlap.
+---
+ server/src/lib/db-errors.ts            | 20 ++++++
+ server/src/services/blocks.service.ts  | 66 +++++++++++--------
+ server/src/services/booking.service.ts | 91 ++++++++++++++------------
+ 3 files changed, 105 insertions(+), 72 deletions(-)
+ create mode 100644 server/src/lib/db-errors.ts
+
+diff --git a/server/src/lib/db-errors.ts b/server/src/lib/db-errors.ts
+new file mode 100644
+index 0000000..e8ea3ed
+--- /dev/null
++++ b/server/src/lib/db-errors.ts
+@@ -0,0 +1,20 @@
++import { Prisma } from "@prisma/client";
++
++/**
++ * Nhận diện lỗi vi phạm exclusion constraint `no_overlap` của Postgres
++ * (SQLSTATE 23P01). Không coi P2002 (unique) là trùng lịch.
++ */
++export function isOverlapConstraintError(error: unknown): boolean {
++  if (error instanceof Prisma.PrismaClientKnownRequestError) {
++    const pgCode = (error.meta as { code?: string } | undefined)?.code;
++    if (pgCode === "23P01") return true;
++  }
++  if (error instanceof Error) {
++    return (
++      error.message.includes("no_overlap") ||
++      error.message.includes("23P01") ||
++      error.message.includes("exclusion constraint")
++    );
++  }
++  return false;
++}
+diff --git a/server/src/services/blocks.service.ts b/server/src/services/blocks.service.ts
+index 1fac961..d011ddf 100644
+--- a/server/src/services/blocks.service.ts
++++ b/server/src/services/blocks.service.ts
+@@ -1,5 +1,6 @@
+ import prisma from "../lib/prisma.js";
+ import { findActiveZoneOverlap } from "../lib/zone-overlap.js";
++import { isOverlapConstraintError } from "../lib/db-errors.js";
+ import type { CreateBlockInput } from "../validators/blocks.validator.js";
+ 
+ export class BlockError extends Error {
+@@ -43,39 +44,46 @@ export async function createBlock(ownerId: string, input: CreateBlockInput) {
+     );
+   }
+ 
+-  return prisma.$transaction(async (tx) => {
+-    const booking = await tx.booking.create({
+-      data: {
+-        userId: ownerId,
+-        fieldType: "block",
+-        startsAt,
+-        endsAt,
+-        status: "confirmed",
+-        totalAmount: 0,
+-        deposit: 0,
+-        note: input.note,
+-      },
+-    });
++  try {
++    return await prisma.$transaction(async (tx) => {
++      const booking = await tx.booking.create({
++        data: {
++          userId: ownerId,
++          fieldType: "block",
++          startsAt,
++          endsAt,
++          status: "confirmed",
++          totalAmount: 0,
++          deposit: 0,
++          note: input.note,
++        },
++      });
+ 
+-    await tx.bookingZone.create({
+-      data: {
+-        bookingId: booking.id,
+-        zoneId: zone.id,
+-        startsAt,
+-        endsAt,
+-        isActive: true,
+-      },
+-    });
++      await tx.bookingZone.create({
++        data: {
++          bookingId: booking.id,
++          zoneId: zone.id,
++          startsAt,
++          endsAt,
++          isActive: true,
++        },
++      });
+ 
+-    return tx.booking.findUniqueOrThrow({
+-      where: { id: booking.id },
+-      include: {
+-        bookingZones: {
+-          include: { zone: { select: { id: true, name: true, surface: true } } },
++      return tx.booking.findUniqueOrThrow({
++        where: { id: booking.id },
++        include: {
++          bookingZones: {
++            include: { zone: { select: { id: true, name: true, surface: true } } },
++          },
+         },
+-      },
++      });
+     });
+-  });
++  } catch (error) {
++    if (isOverlapConstraintError(error)) {
++      throw new BlockError("Vùng sân vừa được đặt trong khoảng thời gian này", 409);
++    }
++    throw error;
++  }
+ }
+ 
+ export async function listBlocks(from?: Date, to?: Date) {
+diff --git a/server/src/services/booking.service.ts b/server/src/services/booking.service.ts
+index 2d3fbc4..394292d 100644
+--- a/server/src/services/booking.service.ts
++++ b/server/src/services/booking.service.ts
+@@ -1,9 +1,9 @@
+-import { Prisma } from "@prisma/client";
++import type { Prisma } from "@prisma/client";
+ import prisma from "../lib/prisma.js";
+ import { getAppSettings } from "./settings.service.js";
++import { isOverlapConstraintError } from "../lib/db-errors.js";
+ import {
+   vietnamToUtc,
+-  utcToVietnamTime,
+   minutesToTime,
+   generateCandidateTimes,
+   isWithinOperatingHours,
+@@ -25,22 +25,6 @@ export class BookingError extends Error {
+   }
+ }
+ 
+-// ─── Kiểm tra lỗi exclusion constraint ──────────────
+-
+-function isOverlapConstraintError(error: unknown): boolean {
+-  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+-    if (error.code === "P2002") return true;
+-  }
+-  if (error instanceof Error) {
+-    return (
+-      error.message.includes("no_overlap") ||
+-      error.message.includes("exclusion") ||
+-      error.message.includes("23P01")
+-    );
+-  }
+-  return false;
+-}
+-
+ // ─── Types ───────────────────────────────────────────
+ 
+ interface BusyPeriod {
+@@ -72,9 +56,12 @@ function hasTimeOverlap(
+ 
+ // ─── API: Xem giờ trống ──────────────────────────────
+ 
+-export async function getAvailableSlots(
+-  query: AvailableSlotsQuery
+-): Promise<{ date: string; fieldType: string; duration: number; slots: AvailableSlot[] }> {
++export async function getAvailableSlots(query: AvailableSlotsQuery): Promise<{
++  date: string;
++  fieldType: string;
++  duration: number;
++  slots: AvailableSlot[];
++}> {
+   const settings = await getAppSettings();
+   const zones = await prisma.zone.findMany({ orderBy: { name: "asc" } });
+ 
+@@ -94,7 +81,12 @@ export async function getAvailableSlots(
+   );
+ 
+   if (candidates.length === 0) {
+-    return { date: query.date, fieldType: query.fieldType, duration: query.duration, slots: [] };
++    return {
++      date: query.date,
++      fieldType: query.fieldType,
++      duration: query.duration,
++      slots: [],
++    };
+   }
+ 
+   // Khoảng thời gian cả ngày (UTC) để query 1 lần
+@@ -155,7 +147,12 @@ export async function getAvailableSlots(
+     }
+   }
+ 
+-  return { date: query.date, fieldType: query.fieldType, duration: query.duration, slots };
++  return {
++    date: query.date,
++    fieldType: query.fieldType,
++    duration: query.duration,
++    slots,
++  };
+ }
+ 
+ // ─── API: Tạo booking ───────────────────────────────
+@@ -166,9 +163,7 @@ export async function createBooking(userId: string, input: CreateBookingInput) {
+ 
+   // Validate thời lượng
+   if (!settings.allowed_durations.includes(input.duration)) {
+-    throw new BookingError(
+-      `Thời lượng ${input.duration} phút không được phép`
+-    );
++    throw new BookingError(`Thời lượng ${input.duration} phút không được phép`);
+   }
+ 
+   const startsAt = new Date(input.startsAt);
+@@ -194,17 +189,32 @@ export async function createBooking(userId: string, input: CreateBookingInput) {
+   }
+ 
+   // Tính giá (chụp lúc đặt)
+-  const pricePerHour =
+-    input.fieldType === "five" ? settings.price_5 : settings.price_7;
++  const pricePerHour = input.fieldType === "five" ? settings.price_5 : settings.price_7;
+   const totalAmount = Math.round(pricePerHour * (input.duration / 60));
+ 
+   // Hạn giữ chỗ
+-  const expiresAt = new Date(
+-    Date.now() + settings.hold_timeout_minutes * 60 * 1000
+-  );
++  const expiresAt = new Date(Date.now() + settings.hold_timeout_minutes * 60 * 1000);
++
++  // Khi nhiều request cùng chọn một vùng, constraint chỉ cho một request thắng.
++  // Các request thua KHÔNG được báo hết sân ngay: transaction của chúng đã bị
++  // hủy nên phải mở transaction mới, đọc lại vùng bận và chọn vùng khác.
++  // Mỗi vòng có ít nhất một request thành công nên số vòng tối đa ~ số vùng.
++  const maxAttempts = zones.length + 2;
++
++  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
++    try {
++      return await tryCreateBooking();
++    } catch (error) {
++      if (!isOverlapConstraintError(error)) throw error;
++      // Lùi một chút ngẫu nhiên để các request đang tranh nhau lệch nhịp
++      await new Promise((r) => setTimeout(r, Math.random() * 20));
++    }
++  }
++
++  throw new BookingError("Vừa có người đặt trước, mời chọn giờ khác", 409);
+ 
+-  try {
+-    return await prisma.$transaction(async (tx) => {
++  function tryCreateBooking() {
++    return prisma.$transaction(async (tx) => {
+       // Tìm booking_zones active chồng thời gian
+       const busy = await tx.bookingZone.findMany({
+         where: {
+@@ -280,15 +290,6 @@ export async function createBooking(userId: string, input: CreateBookingInput) {
+         },
+       });
+     });
+-  } catch (error) {
+-    // Bắt lỗi exclusion constraint (race condition bị chặn ở DB)
+-    if (isOverlapConstraintError(error)) {
+-      throw new BookingError(
+-        "Vừa có người đặt trước, mời chọn giờ khác",
+-        409
+-      );
+-    }
+-    throw error;
+   }
+ }
+ 
+@@ -410,7 +411,11 @@ export async function listBookings(userId: string, userRole: string) {
+ 
+ // ─── API: Chi tiết booking ──────────────────────────
+ 
+-export async function getBookingById(bookingId: string, userId: string, userRole: string) {
++export async function getBookingById(
++  bookingId: string,
++  userId: string,
++  userRole: string
++) {
+   const booking = await prisma.booking.findUnique({
+     where: { id: bookingId },
+     include: {
+-- 
+2.43.0
+
+
+From 2c34bb733f4ef0ea83450ffc80cc3ded38f6e03d Mon Sep 17 00:00:00 2001
+From: Dev <dev@example.com>
+Date: Mon, 9 Nov 2026 16:39:19 +0000
+Subject: [PATCH 2/3] test: protect dev data, run integration files serially,
+ fail in CI when DB is missing
+
+- refuse to run unless DATABASE_URL points to a *test* database
+- load server/.env.test, disable file parallelism
+- no silent describe.skip in CI
+- make 'Case 1' a real rejection test
+---
+ .gitignore                                    |  1 +
+ server/.env.test.example                      |  5 ++
+ server/src/tests/auth.integration.test.ts     | 19 +-----
+ server/src/tests/auth.test.ts                 | 12 ++--
+ server/src/tests/booking.integration.test.ts  | 68 ++++++++-----------
+ server/src/tests/booking.test.ts              | 21 +++---
+ server/src/tests/health.test.ts               |  8 +--
+ server/src/tests/helpers/test-db.ts           | 25 +++++--
+ .../src/tests/management.integration.test.ts  | 30 ++------
+ server/src/tests/setup.ts                     | 13 ++++
+ server/vitest.config.ts                       |  8 +++
+ 11 files changed, 102 insertions(+), 108 deletions(-)
+ create mode 100644 server/.env.test.example
+ create mode 100644 server/src/tests/setup.ts
+
+diff --git a/.gitignore b/.gitignore
+index 3ba1a1b..1ab08f6 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -8,6 +8,7 @@ build/
+ # Environment
+ .env
+ .env.local
++.env.test
+ .env.*.local
+ 
+ # IDE
+diff --git a/server/.env.test.example b/server/.env.test.example
+new file mode 100644
+index 0000000..f75dc0b
+--- /dev/null
++++ b/server/.env.test.example
+@@ -0,0 +1,5 @@
++# Copy thành .env.test — dùng cho `npm test`, TUYỆT ĐỐI khác DB dev
++DATABASE_URL="postgresql://sanbong:sanbong_secret@localhost:5433/sanbong_test?schema=public"
++JWT_SECRET=test-secret
++JWT_REFRESH_SECRET=test-refresh-secret
++NODE_ENV=test
+diff --git a/server/src/tests/auth.integration.test.ts b/server/src/tests/auth.integration.test.ts
+index a9cebd1..7e4fdbd 100644
+--- a/server/src/tests/auth.integration.test.ts
++++ b/server/src/tests/auth.integration.test.ts
+@@ -1,23 +1,10 @@
+-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
++import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+ import request from "supertest";
+ import app from "../app.js";
+-import prisma from "../lib/prisma.js";
+ import { generateTokens } from "../lib/jwt.js";
+-import {
+-  createUserWithRole,
+-  resetUsers,
+-} from "./helpers/test-db.js";
++import { createUserWithRole, resetUsers } from "./helpers/test-db.js";
+ 
+-async function canReachDatabase() {
+-  try {
+-    await prisma.$queryRaw`SELECT 1`;
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-
+-const describeDb = (await canReachDatabase()) ? describe : describe.skip;
++const describeDb = await getDescribeDb();
+ 
+ describeDb("Auth API (integration)", () => {
+   beforeAll(async () => {
+diff --git a/server/src/tests/auth.test.ts b/server/src/tests/auth.test.ts
+index 10f2c28..04f9baa 100644
+--- a/server/src/tests/auth.test.ts
++++ b/server/src/tests/auth.test.ts
+@@ -1,9 +1,5 @@
+-import { describe, it, expect, beforeEach, vi } from "vitest";
+-import {
+-  generateTokens,
+-  verifyAccessToken,
+-  verifyRefreshToken,
+-} from "../lib/jwt.js";
++import { describe, it, expect, beforeEach } from "vitest";
++import { generateTokens, verifyAccessToken, verifyRefreshToken } from "../lib/jwt.js";
+ import { hashPassword, comparePassword } from "../lib/password.js";
+ 
+ // ─── JWT Tests ───────────────────────────────────────
+@@ -83,8 +79,8 @@ describe("Password Utils", () => {
+ 
+ describe("Auth Validators", () => {
+   // Import dynamically to avoid module resolution issues
+-  let registerSchema: typeof import("../validators/auth.validator.js")["registerSchema"];
+-  let loginSchema: typeof import("../validators/auth.validator.js")["loginSchema"];
++  let registerSchema: (typeof import("../validators/auth.validator.js"))["registerSchema"];
++  let loginSchema: (typeof import("../validators/auth.validator.js"))["loginSchema"];
+ 
+   beforeEach(async () => {
+     const mod = await import("../validators/auth.validator.js");
+diff --git a/server/src/tests/booking.integration.test.ts b/server/src/tests/booking.integration.test.ts
+index 8b6ab73..f11b8f4 100644
+--- a/server/src/tests/booking.integration.test.ts
++++ b/server/src/tests/booking.integration.test.ts
+@@ -1,22 +1,16 @@
+-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
++import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+ import request from "supertest";
+ import app from "../app.js";
+ import { generateTokens } from "../lib/jwt.js";
+ import prisma from "../lib/prisma.js";
+-import { createUserWithRole, resetBookingData, resetUsers } from "./helpers/test-db.js";
++import {
++  createUserWithRole,
++  getDescribeDb,
++  resetBookingData,
++  resetUsers,
++} from "./helpers/test-db.js";
+ 
+-// ─── Chỉ chạy khi có DB ─────────────────────────────
+-
+-async function canReachDatabase() {
+-  try {
+-    await prisma.$queryRaw`SELECT 1`;
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-
+-const describeDb = (await canReachDatabase()) ? describe : describe.skip;
++const describeDb = await getDescribeDb();
+ 
+ // ─── Helpers ─────────────────────────────────────────
+ 
+@@ -50,7 +44,10 @@ describeDb("Booking Integration Tests", () => {
+     const { user: customer } = await createUserWithRole("customer", suffix);
+     const { user: owner } = await createUserWithRole("owner", suffix);
+     customerId = customer.id;
+-    customerToken = generateTokens({ userId: customer.id, role: customer.role }).accessToken;
++    customerToken = generateTokens({
++      userId: customer.id,
++      role: customer.role,
++    }).accessToken;
+     ownerToken = generateTokens({ userId: owner.id, role: owner.role }).accessToken;
+   });
+ 
+@@ -158,30 +155,25 @@ describeDb("Booking Integration Tests", () => {
+ 
+   // ─── 4 tình huống bảng 1.2 ───────────────────────
+ 
+-  it("Case 1: rejects sân 5 on A2 when sân 7#1 already booked (chung vùng + giờ chồng)", async () => {
++  it("Case 1: sân 7 chiếm cả mặt cỏ nên chỉ còn 3 vùng sân 5, vùng thứ 4 bị từ chối (409)", async () => {
+     const startsAt = futureUtc(8, "18:00");
++    const book = (fieldType: "five" | "seven") =>
++      request(app)
++        .post("/api/bookings")
++        .set("Authorization", `Bearer ${customerToken}`)
++        .send({ fieldType, startsAt, duration: 60 });
+ 
+-    // Book sân 7 → chiếm 3 vùng surface A
+-    const first = await request(app)
+-      .post("/api/bookings")
+-      .set("Authorization", `Bearer ${customerToken}`)
+-      .send({ fieldType: "seven", startsAt, duration: 60 })
+-      .expect(201);
+-
+-    const bookedSurface = first.body.booking.bookingZones[0].zone.surface;
++    const seven = await book("seven").expect(201);
++    const sevenSurface = seven.body.booking.bookingZones[0].zone.surface;
+ 
+-    // Kiểm tra: sân 5 cùng thời gian → vẫn có thể book (vùng khác surface)
+-    // Nhưng: đã chiếm 3 vùng surface A hoặc B, nên availableCount giảm
+-    const date = futureDate(8);
+-    const slotsRes = await request(app)
+-      .get(`/api/bookings/available?date=${date}&fieldType=five&duration=60`)
+-      .expect(200);
++    // 3 sân 5 còn lại đều rơi vào mặt cỏ KHÁC
++    for (let i = 0; i < 3; i++) {
++      const five = await book("five").expect(201);
++      expect(five.body.booking.bookingZones[0].zone.surface).not.toBe(sevenSurface);
++    }
+ 
+-    const slot = slotsRes.body.slots.find(
+-      (s: { startTime: string }) => s.startTime === "18:00"
+-    );
+-    // 6 - 3 = 3 vùng còn trống (surface kia)
+-    expect(slot.availableCount).toBe(3);
++    // Hết vùng: sân 5 thứ 4 phải bị từ chối
++    await book("five").expect(409);
+   });
+ 
+   it("Case 2: allows sân 5 on B1 when sân 7#1 booked on surface A (khác mặt cỏ)", async () => {
+@@ -392,10 +384,8 @@ describeDb("Booking Integration Tests", () => {
+     const successes = results.filter((r) => r.status === 201);
+ 
+     // Thu thập tất cả zone đã gán
+-    const assignedZones = successes.flatMap(
+-      (r) => r.body.booking.bookingZones.map(
+-        (bz: { zone: { id: string } }) => bz.zone.id
+-      )
++    const assignedZones = successes.flatMap((r) =>
++      r.body.booking.bookingZones.map((bz: { zone: { id: string } }) => bz.zone.id)
+     );
+ 
+     // Không có zone nào bị gán trùng
+diff --git a/server/src/tests/booking.test.ts b/server/src/tests/booking.test.ts
+index 3665293..3043752 100644
+--- a/server/src/tests/booking.test.ts
++++ b/server/src/tests/booking.test.ts
+@@ -1,4 +1,4 @@
+-import { describe, it, expect } from "vitest";
++import { describe, it, expect, beforeEach } from "vitest";
+ import {
+   timeToMinutes,
+   minutesToTime,
+@@ -168,18 +168,17 @@ describe("Price Calculation", () => {
+ // ─── Zone conflict logic ─────────────────────────────
+ 
+ describe("Zone Conflict Logic", () => {
+-  const hasTimeOverlap = (
+-    s1: number, e1: number,
+-    s2: number, e2: number
+-  ) => s1 < e2 && s2 < e1;
++  const hasTimeOverlap = (s1: number, e1: number, s2: number, e2: number) =>
++    s1 < e2 && s2 < e1;
+ 
+-  const hasZoneConflict = (z1: string[], z2: string[]) =>
+-    z1.some((z) => z2.includes(z));
++  const hasZoneConflict = (z1: string[], z2: string[]) => z1.some((z) => z2.includes(z));
+ 
+   const hasConflict = (
+     b1: { zones: string[]; start: number; end: number },
+     b2: { zones: string[]; start: number; end: number }
+-  ) => hasZoneConflict(b1.zones, b2.zones) && hasTimeOverlap(b1.start, b1.end, b2.start, b2.end);
++  ) =>
++    hasZoneConflict(b1.zones, b2.zones) &&
++    hasTimeOverlap(b1.start, b1.end, b2.start, b2.end);
+ 
+   // 4 tình huống từ bảng mục 1.2 trong kế hoạch
+ 
+@@ -232,8 +231,8 @@ describe("Zone Conflict Logic", () => {
+ // ─── Booking validator ───────────────────────────────
+ 
+ describe("Booking Validators", () => {
+-  let availableSlotsQuerySchema: typeof import("../validators/booking.validator.js")["availableSlotsQuerySchema"];
+-  let createBookingSchema: typeof import("../validators/booking.validator.js")["createBookingSchema"];
++  let availableSlotsQuerySchema: (typeof import("../validators/booking.validator.js"))["availableSlotsQuerySchema"];
++  let createBookingSchema: (typeof import("../validators/booking.validator.js"))["createBookingSchema"];
+ 
+   beforeEach(async () => {
+     const mod = await import("../validators/booking.validator.js");
+@@ -245,7 +244,7 @@ describe("Booking Validators", () => {
+     const result = availableSlotsQuerySchema.safeParse({
+       date: "2026-12-01",
+       fieldType: "five",
+-      duration: "60",  // coerce string → number
++      duration: "60", // coerce string → number
+     });
+     expect(result.success).toBe(true);
+   });
+diff --git a/server/src/tests/health.test.ts b/server/src/tests/health.test.ts
+index 04eda13..49a5f9f 100644
+--- a/server/src/tests/health.test.ts
++++ b/server/src/tests/health.test.ts
+@@ -43,12 +43,8 @@ describe("Health Check", () => {
+ 
+   it("should detect zone conflicts correctly", () => {
+     // Test logic xung đột: 2 booking chồng khi dùng chung vùng VÀ thời gian chồng
+-    const hasTimeOverlap = (
+-      start1: number,
+-      end1: number,
+-      start2: number,
+-      end2: number
+-    ) => start1 < end2 && start2 < end1;
++    const hasTimeOverlap = (start1: number, end1: number, start2: number, end2: number) =>
++      start1 < end2 && start2 < end1;
+ 
+     const hasZoneConflict = (zones1: string[], zones2: string[]) =>
+       zones1.some((z) => zones2.includes(z));
+diff --git a/server/src/tests/helpers/test-db.ts b/server/src/tests/helpers/test-db.ts
+index d38c329..4b94318 100644
+--- a/server/src/tests/helpers/test-db.ts
++++ b/server/src/tests/helpers/test-db.ts
+@@ -1,3 +1,4 @@
++import { describe } from "vitest";
+ import prisma from "../../lib/prisma.js";
+ import { hashPassword } from "../../lib/password.js";
+ 
+@@ -12,10 +13,7 @@ export async function resetUsers() {
+   await prisma.user.deleteMany();
+ }
+ 
+-export async function createUserWithRole(
+-  role: "customer" | "owner",
+-  suffix: string
+-) {
++export async function createUserWithRole(role: "customer" | "owner", suffix: string) {
+   const password = "TestPass123";
+   const passwordHash = await hashPassword(password);
+ 
+@@ -30,3 +28,22 @@ export async function createUserWithRole(
+ 
+   return { user, password };
+ }
++
++/**
++ * Trả về `describe` nếu DB test kết nối được.
++ * - Local: không có DB thì bỏ qua (describe.skip) để chạy được unit test.
++ * - CI: không có DB là lỗi cấu hình, phải đỏ chứ không được xanh giả.
++ */
++export async function getDescribeDb() {
++  try {
++    await prisma.$queryRaw`SELECT 1`;
++    return describe;
++  } catch (error) {
++    if (process.env.CI) {
++      throw new Error("Integration test cần database nhưng không kết nối được trong CI", {
++        cause: error,
++      });
++    }
++    return describe.skip;
++  }
++}
+diff --git a/server/src/tests/management.integration.test.ts b/server/src/tests/management.integration.test.ts
+index 15d13a8..4c68e04 100644
+--- a/server/src/tests/management.integration.test.ts
++++ b/server/src/tests/management.integration.test.ts
+@@ -1,24 +1,11 @@
+-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
++import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+ import request from "supertest";
+ import app from "../app.js";
+ import { generateTokens } from "../lib/jwt.js";
+ import prisma from "../lib/prisma.js";
+-import {
+-  createUserWithRole,
+-  resetBookingData,
+-  resetUsers,
+-} from "./helpers/test-db.js";
+-
+-async function canReachDatabase() {
+-  try {
+-    await prisma.$queryRaw`SELECT 1`;
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-
+-const describeDb = (await canReachDatabase()) ? describe : describe.skip;
++import { createUserWithRole, resetBookingData, resetUsers } from "./helpers/test-db.js";
++
++const describeDb = await getDescribeDb();
+ 
+ describeDb("Settings, zones & blocks (integration)", () => {
+   beforeAll(async () => {
+@@ -50,10 +37,7 @@ describeDb("Settings, zones & blocks (integration)", () => {
+   it("allows owner to update settings, denies customer", async () => {
+     const suffix = `${Date.now()}`;
+     const { user: owner } = await createUserWithRole("owner", `o-${suffix}`);
+-    const { user: customer } = await createUserWithRole(
+-      "customer",
+-      `c-${suffix}`
+-    );
++    const { user: customer } = await createUserWithRole("customer", `c-${suffix}`);
+ 
+     const ownerToken = generateTokens({
+       userId: owner.id,
+@@ -92,9 +76,7 @@ describeDb("Settings, zones & blocks (integration)", () => {
+     }).accessToken;
+ 
+     const zonesRes = await request(app).get("/api/zones").expect(200);
+-    const zoneA1 = zonesRes.body.zones.find(
+-      (z: { name: string }) => z.name === "A1"
+-    );
++    const zoneA1 = zonesRes.body.zones.find((z: { name: string }) => z.name === "A1");
+ 
+     const startsAt = "2026-12-01T11:00:00.000Z";
+     const endsAt = "2026-12-01T12:00:00.000Z";
+diff --git a/server/src/tests/setup.ts b/server/src/tests/setup.ts
+new file mode 100644
+index 0000000..1267fd1
+--- /dev/null
++++ b/server/src/tests/setup.ts
+@@ -0,0 +1,13 @@
++// Chốt chặn an toàn: test xóa sạch users/bookings,
++// nên chỉ được chạy trên database có tên chứa "test".
++const url = process.env.DATABASE_URL;
++
++if (url) {
++  const dbName = new URL(url).pathname.replace(/^\//, "");
++  if (!dbName.toLowerCase().includes("test")) {
++    throw new Error(
++      `Từ chối chạy test trên database "${dbName}". ` +
++        `Tạo DB riêng (ví dụ sanbong_test) và đặt DATABASE_URL trong server/.env.test`
++    );
++  }
++}
+diff --git a/server/vitest.config.ts b/server/vitest.config.ts
+index fdecfd5..3d32af3 100644
+--- a/server/vitest.config.ts
++++ b/server/vitest.config.ts
+@@ -1,10 +1,18 @@
+ import { defineConfig } from "vitest/config";
++import dotenv from "dotenv";
++
++// Ưu tiên .env.test (nếu có) để test không bao giờ chạm DB dev
++dotenv.config({ path: ".env.test", override: true });
+ 
+ export default defineConfig({
+   test: {
+     globals: true,
+     environment: "node",
+     include: ["src/**/*.test.ts"],
++    setupFiles: ["./src/tests/setup.ts"],
++    // Các file integration dùng chung một DB và tự xóa dữ liệu,
++    // chạy song song sẽ xóa dữ liệu của nhau.
++    fileParallelism: false,
+     coverage: {
+       reporter: ["text", "lcov"],
+     },
+-- 
+2.43.0
+
+
+From c0c73731131b52b89111e9e36f3f1ecc689c709c Mon Sep 17 00:00:00 2001
+From: Dev <dev@example.com>
+Date: Mon, 9 Nov 2026 16:39:19 +0000
+Subject: [PATCH 3/3] chore(ci): make lint, typecheck and format checks pass
+
+- replace Express namespace augmentation (no-namespace)
+- fix jsonwebtoken expiresIn typing and req.params.id typing
+- split tsconfig for tests, add typecheck script, run it in CI
+- prettier --write
+---
+ .github/workflows/ci.yml                   |  3 +-
+ server/package.json                        |  3 +-
+ server/src/lib/jwt.ts                      |  6 +--
+ server/src/lib/password.ts                 |  5 +-
+ server/src/middleware/auth.ts              |  8 ++--
+ server/src/middleware/rate-limit.ts        | 17 ++++---
+ server/src/routes/auth.ts                  | 18 +++----
+ server/src/routes/bookings.ts              | 56 ++++++++--------------
+ server/src/services/auth.service.ts        |  6 +--
+ server/src/services/settings.service.ts    |  7 +--
+ server/src/validators/booking.validator.ts |  4 +-
+ server/tsconfig.json                       | 18 +++++--
+ server/tsconfig.test.json                  | 23 +++++++++
+ 13 files changed, 92 insertions(+), 82 deletions(-)
+ create mode 100644 server/tsconfig.test.json
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index c548a9c..67b7bed 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -34,7 +34,7 @@ jobs:
+ 
+       - name: Type Check
+         working-directory: server
+-        run: npx tsc --noEmit
++        run: npm run typecheck
+ 
+       - name: Format Check
+         working-directory: server
+@@ -95,4 +95,5 @@ jobs:
+           JWT_SECRET: test-secret
+           JWT_REFRESH_SECRET: test-refresh-secret
+           NODE_ENV: test
++          CI: "true"
+         run: npm test
+diff --git a/server/package.json b/server/package.json
+index 5f26990..6a0e9df 100644
+--- a/server/package.json
++++ b/server/package.json
+@@ -14,7 +14,8 @@
+     "db:migrate": "prisma migrate dev",
+     "db:push": "prisma db push",
+     "db:seed": "tsx prisma/seed.ts",
+-    "db:studio": "prisma studio"
++    "db:studio": "prisma studio",
++    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json"
+   },
+   "dependencies": {
+     "@prisma/client": "^6.0.0",
+diff --git a/server/src/lib/jwt.ts b/server/src/lib/jwt.ts
+index 1ca9dc2..55f6511 100644
+--- a/server/src/lib/jwt.ts
++++ b/server/src/lib/jwt.ts
+@@ -1,4 +1,4 @@
+-import jwt from "jsonwebtoken";
++import jwt, { type SignOptions } from "jsonwebtoken";
+ 
+ // ─── Types ───────────────────────────────────────────
+ 
+@@ -23,11 +23,11 @@ const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || "7d";
+ 
+ export function generateTokens(payload: TokenPayload): TokenPair {
+   const accessToken = jwt.sign(payload, JWT_SECRET, {
+-    expiresIn: JWT_EXPIRES_IN,
++    expiresIn: JWT_EXPIRES_IN as SignOptions["expiresIn"],
+   });
+ 
+   const refreshToken = jwt.sign(payload, JWT_REFRESH_SECRET, {
+-    expiresIn: JWT_REFRESH_EXPIRES_IN,
++    expiresIn: JWT_REFRESH_EXPIRES_IN as SignOptions["expiresIn"],
+   });
+ 
+   return { accessToken, refreshToken };
+diff --git a/server/src/lib/password.ts b/server/src/lib/password.ts
+index 4dffb01..09553dc 100644
+--- a/server/src/lib/password.ts
++++ b/server/src/lib/password.ts
+@@ -12,9 +12,6 @@ export async function hashPassword(password: string): Promise<string> {
+ /**
+  * So sánh mật khẩu với bản băm
+  */
+-export async function comparePassword(
+-  password: string,
+-  hash: string
+-): Promise<boolean> {
++export async function comparePassword(password: string, hash: string): Promise<boolean> {
+   return bcrypt.compare(password, hash);
+ }
+diff --git a/server/src/middleware/auth.ts b/server/src/middleware/auth.ts
+index 95b128d..3b33fa7 100644
+--- a/server/src/middleware/auth.ts
++++ b/server/src/middleware/auth.ts
+@@ -3,11 +3,9 @@ import { verifyAccessToken, type TokenPayload } from "../lib/jwt.js";
+ 
+ // ─── Mở rộng Express Request để có user info ────────
+ 
+-declare global {
+-  namespace Express {
+-    interface Request {
+-      user?: TokenPayload;
+-    }
++declare module "express-serve-static-core" {
++  interface Request {
++    user?: TokenPayload;
+   }
+ }
+ 
+diff --git a/server/src/middleware/rate-limit.ts b/server/src/middleware/rate-limit.ts
+index 4ee6b1d..656763e 100644
+--- a/server/src/middleware/rate-limit.ts
++++ b/server/src/middleware/rate-limit.ts
+@@ -17,14 +17,17 @@ interface AttemptRecord {
+ const attempts = new Map<string, AttemptRecord>();
+ 
+ // Dọn dẹp bộ nhớ mỗi 5 phút
+-setInterval(() => {
+-  const now = Date.now();
+-  for (const [key, record] of attempts) {
+-    if (record.resetAt <= now) {
+-      attempts.delete(key);
++setInterval(
++  () => {
++    const now = Date.now();
++    for (const [key, record] of attempts) {
++      if (record.resetAt <= now) {
++        attempts.delete(key);
++      }
+     }
+-  }
+-}, 5 * 60 * 1000);
++  },
++  5 * 60 * 1000
++);
+ 
+ export function rateLimit({
+   windowMs = 15 * 60 * 1000, // 15 phút
+diff --git a/server/src/routes/auth.ts b/server/src/routes/auth.ts
+index fc518a5..5c3eb71 100644
+--- a/server/src/routes/auth.ts
++++ b/server/src/routes/auth.ts
+@@ -80,18 +80,14 @@ router.post(
+ 
+ // ─── GET /api/auth/me ────────────────────────────────
+ 
+-router.get(
+-  "/auth/me",
+-  authenticate,
+-  async (req: Request, res: Response) => {
+-    try {
+-      const user = await authService.getProfile(req.user!.userId);
+-      res.json({ user });
+-    } catch (error) {
+-      handleAuthError(error, res);
+-    }
++router.get("/auth/me", authenticate, async (req: Request, res: Response) => {
++  try {
++    const user = await authService.getProfile(req.user!.userId);
++    res.json({ user });
++  } catch (error) {
++    handleAuthError(error, res);
+   }
+-);
++});
+ 
+ // ─── GET /api/auth/owner-test ────────────────────────
+ // Route test: chỉ owner mới truy cập được
+diff --git a/server/src/routes/bookings.ts b/server/src/routes/bookings.ts
+index 0d10bc3..c09a194 100644
+--- a/server/src/routes/bookings.ts
++++ b/server/src/routes/bookings.ts
+@@ -54,10 +54,7 @@ router.post(
+   validate(createBookingSchema),
+   async (req: Request, res: Response) => {
+     try {
+-      const booking = await bookingService.createBooking(
+-        req.user!.userId,
+-        req.body
+-      );
++      const booking = await bookingService.createBooking(req.user!.userId, req.body);
+       res.status(201).json({
+         message: "Đặt sân thành công",
+         booking,
+@@ -71,41 +68,30 @@ router.post(
+ // ─── GET /api/bookings ──────────────────────────────
+ // Danh sách booking: customer thấy của mình, owner thấy tất cả
+ 
+-router.get(
+-  "/bookings",
+-  authenticate,
+-  async (req: Request, res: Response) => {
+-    try {
+-      const bookings = await bookingService.listBookings(
+-        req.user!.userId,
+-        req.user!.role
+-      );
+-      res.json({ bookings });
+-    } catch (error) {
+-      handleBookingError(error, res);
+-    }
++router.get("/bookings", authenticate, async (req: Request, res: Response) => {
++  try {
++    const bookings = await bookingService.listBookings(req.user!.userId, req.user!.role);
++    res.json({ bookings });
++  } catch (error) {
++    handleBookingError(error, res);
+   }
+-);
++});
+ 
+ // ─── GET /api/bookings/:id ──────────────────────────
+ // Chi tiết booking
+ 
+-router.get(
+-  "/bookings/:id",
+-  authenticate,
+-  async (req: Request, res: Response) => {
+-    try {
+-      const booking = await bookingService.getBookingById(
+-        req.params.id,
+-        req.user!.userId,
+-        req.user!.role
+-      );
+-      res.json({ booking });
+-    } catch (error) {
+-      handleBookingError(error, res);
+-    }
++router.get("/bookings/:id", authenticate, async (req: Request, res: Response) => {
++  try {
++    const booking = await bookingService.getBookingById(
++      String(req.params.id),
++      req.user!.userId,
++      req.user!.role
++    );
++    res.json({ booking });
++  } catch (error) {
++    handleBookingError(error, res);
+   }
+-);
++});
+ 
+ // ─── PATCH /api/bookings/:id/cancel ─────────────────
+ // Hủy booking (customer hoặc owner)
+@@ -116,7 +102,7 @@ router.patch(
+   async (req: Request, res: Response) => {
+     try {
+       const booking = await bookingService.cancelBooking(
+-        req.params.id,
++        String(req.params.id),
+         req.user!.userId,
+         req.user!.role
+       );
+@@ -139,7 +125,7 @@ router.patch(
+   authorize("owner"),
+   async (req: Request, res: Response) => {
+     try {
+-      const booking = await bookingService.confirmBooking(req.params.id);
++      const booking = await bookingService.confirmBooking(String(req.params.id));
+       res.json({
+         message: "Đã xác nhận booking",
+         booking,
+diff --git a/server/src/services/auth.service.ts b/server/src/services/auth.service.ts
+index 6d127f5..0c3ccca 100644
+--- a/server/src/services/auth.service.ts
++++ b/server/src/services/auth.service.ts
+@@ -1,10 +1,6 @@
+ import prisma from "../lib/prisma.js";
+ import { hashPassword, comparePassword } from "../lib/password.js";
+-import {
+-  generateTokens,
+-  verifyRefreshToken,
+-  type TokenPayload,
+-} from "../lib/jwt.js";
++import { generateTokens, verifyRefreshToken, type TokenPayload } from "../lib/jwt.js";
+ import type { RegisterInput, LoginInput } from "../validators/auth.validator.js";
+ 
+ // ─── Custom errors ───────────────────────────────────
+diff --git a/server/src/services/settings.service.ts b/server/src/services/settings.service.ts
+index 123de4b..11ec3ea 100644
+--- a/server/src/services/settings.service.ts
++++ b/server/src/services/settings.service.ts
+@@ -50,9 +50,10 @@ export async function getAppSettings(): Promise<AppSettings> {
+ export async function updateAppSettings(
+   partial: Partial<AppSettings>
+ ): Promise<AppSettings> {
+-  const entries = Object.entries(partial).filter(
+-    ([, value]) => value !== undefined
+-  ) as [SettingKey, unknown][];
++  const entries = Object.entries(partial).filter(([, value]) => value !== undefined) as [
++    SettingKey,
++    unknown,
++  ][];
+ 
+   if (entries.length === 0) {
+     return getAppSettings();
+diff --git a/server/src/validators/booking.validator.ts b/server/src/validators/booking.validator.ts
+index f03cf6f..822589c 100644
+--- a/server/src/validators/booking.validator.ts
++++ b/server/src/validators/booking.validator.ts
+@@ -3,9 +3,7 @@ import { z } from "zod";
+ // ─── Xem giờ trống ───────────────────────────────────
+ 
+ export const availableSlotsQuerySchema = z.object({
+-  date: z
+-    .string()
+-    .regex(/^\d{4}-\d{2}-\d{2}$/, "Ngày phải dạng YYYY-MM-DD"),
++  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Ngày phải dạng YYYY-MM-DD"),
+   fieldType: z.enum(["five", "seven"], {
+     errorMap: () => ({ message: "Loại sân phải là 'five' hoặc 'seven'" }),
+   }),
+diff --git a/server/tsconfig.json b/server/tsconfig.json
+index b50c55e..3267bb5 100644
+--- a/server/tsconfig.json
++++ b/server/tsconfig.json
+@@ -3,7 +3,9 @@
+     "target": "ES2022",
+     "module": "NodeNext",
+     "moduleResolution": "NodeNext",
+-    "lib": ["ES2022"],
++    "lib": [
++      "ES2022"
++    ],
+     "outDir": "./dist",
+     "rootDir": "./src",
+     "strict": true,
+@@ -16,9 +18,17 @@
+     "sourceMap": true,
+     "baseUrl": ".",
+     "paths": {
+-      "@/*": ["./src/*"]
++      "@/*": [
++        "./src/*"
++      ]
+     }
+   },
+-  "include": ["src/**/*"],
+-  "exclude": ["node_modules", "dist"]
++  "include": [
++    "src/**/*"
++  ],
++  "exclude": [
++    "node_modules",
++    "dist",
++    "src/tests"
++  ]
+ }
+diff --git a/server/tsconfig.test.json b/server/tsconfig.test.json
+new file mode 100644
+index 0000000..ff2b6f6
+--- /dev/null
++++ b/server/tsconfig.test.json
+@@ -0,0 +1,23 @@
++{
++  "extends": "./tsconfig.json",
++  "compilerOptions": {
++    "module": "ESNext",
++    "moduleResolution": "Bundler",
++    "noEmit": true,
++    "declaration": false,
++    "declarationMap": false,
++    "sourceMap": false,
++    "rootDir": "./src",
++    "types": [
++      "node",
++      "vitest/globals"
++    ]
++  },
++  "include": [
++    "src/**/*"
++  ],
++  "exclude": [
++    "node_modules",
++    "dist"
++  ]
++}
+-- 
+2.43.0
+
