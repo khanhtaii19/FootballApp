@@ -1,4 +1,5 @@
 import prisma from "./prisma.js";
+import { liveHoldFilter } from "../services/booking-expiry.service.js";
 
 /**
  * Tìm booking_zone đang active chồng thời gian trên một trong các vùng.
@@ -16,8 +17,8 @@ export async function findActiveZoneOverlap(
 
   return prisma.bookingZone.findFirst({
     where: {
+      ...liveHoldFilter(new Date()),
       zoneId: { in: zoneIds },
-      isActive: true,
       startsAt: { lt: endsAt },
       endsAt: { gt: startsAt },
       ...(excludeBookingId ? { bookingId: { not: excludeBookingId } } : {}),

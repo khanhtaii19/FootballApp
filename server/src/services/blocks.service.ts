@@ -2,6 +2,7 @@ import prisma from "../lib/prisma.js";
 import { findActiveZoneOverlap } from "../lib/zone-overlap.js";
 import { isOverlapConstraintError } from "../lib/db-errors.js";
 import { lockBookingCreation } from "../lib/db-locks.js";
+import { expireStaleBookings } from "./booking-expiry.service.js";
 import type { CreateBlockInput } from "../validators/blocks.validator.js";
 
 export class BlockError extends Error {
@@ -48,6 +49,7 @@ export async function createBlock(ownerId: string, input: CreateBlockInput) {
   try {
     return await prisma.$transaction(async (tx) => {
       await lockBookingCreation(tx);
+      await expireStaleBookings(tx, new Date());
       const booking = await tx.booking.create({
         data: {
           userId: ownerId,

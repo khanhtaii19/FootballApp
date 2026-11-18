@@ -3,6 +3,8 @@ import prisma from "../lib/prisma.js";
 import { getAppSettings } from "./settings.service.js";
 import { isOverlapConstraintError } from "../lib/db-errors.js";
 import { lockBookingCreation } from "../lib/db-locks.js";
+import { getMaxPendingPerUser } from "../lib/booking-limits.js";
+import { expireStaleBookings, liveHoldFilter } from "./booking-expiry.service.js";
 import {
   vietnamToUtc,
   minutesToTime,
@@ -101,7 +103,7 @@ export async function getAvailableSlots(query: AvailableSlotsQuery): Promise<{
   // Lấy TẤT CẢ booking_zones active trong ngày — chỉ 1 query
   const busyPeriods: BusyPeriod[] = await prisma.bookingZone.findMany({
     where: {
-      isActive: true,
+      ...liveHoldFilter(new Date()),
       startsAt: { lt: dayEndUtc },
       endsAt: { gt: dayStartUtc },
     },
@@ -219,6 +221,21 @@ export async function createBooking(userId: string, input: CreateBookingInput) {
       async (tx) => {
         // Xếp hàng: chỉ một transaction được chọn vùng và ghi tại một thời điểm
         await lockBookingCreation(tx);
+
+        // Nhả ngay các booking pending đã quá hạn (không phải đợi job nền)
+        await expireStaleBookings(tx, new Date());
+
+        // Giới hạn số booking đang giữ chỗ của mỗi người
+        const maxPending = getMaxPendingPerUser();
+        const pendingCount = await tx.booking.count({
+          where: { userId, status: "pending" },
+        });
+        if (pendingCount >= maxPending) {
+          throw new BookingError(
+            `Bạn đang có ${pendingCount} booking chờ thanh toán (tối đa ${maxPending}). Hãy thanh toán hoặc hủy bớt trước khi đặt thêm`,
+            429
+          );
+        }
 
         // Tìm booking_zones active chồng thời gian
         const busy = await tx.bookingZone.findMany({
@@ -354,28 +371,40 @@ export async function cancelBooking(bookingId: string, userId: string, userRole:
 // ─── API: Xác nhận booking (owner) ──────────────────
 
 export async function confirmBooking(bookingId: string) {
-  const booking = await prisma.booking.findUnique({
-    where: { id: bookingId },
+  const now = new Date();
+
+  // Một câu lệnh nguyên tử: chỉ xác nhận khi vẫn đang pending VÀ chưa quá hạn.
+  // Tránh việc xác nhận một booking mà job nền vừa nhả chỗ cho người khác.
+  const { count } = await prisma.booking.updateMany({
+    where: {
+      id: bookingId,
+      status: "pending",
+      OR: [{ expiresAt: null }, { expiresAt: { gte: now } }],
+    },
+    data: { status: "confirmed", paidAt: now, expiresAt: null },
   });
 
-  if (!booking) {
-    throw new BookingError("Không tìm thấy booking", 404);
-  }
+  if (count === 0) {
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { status: true },
+    });
 
-  if (booking.status !== "pending") {
+    if (!booking) {
+      throw new BookingError("Không tìm thấy booking", 404);
+    }
+    // pending nhưng quá hạn (job chưa kịp dọn) hoặc đã expired
+    if (booking.status === "pending" || booking.status === "expired") {
+      throw new BookingError("Booking đã hết hạn giữ chỗ, khách cần đặt lại", 409);
+    }
     throw new BookingError(
       `Chỉ xác nhận được booking đang chờ (hiện tại: ${booking.status})`,
       400
     );
   }
 
-  return prisma.booking.update({
+  return prisma.booking.findUniqueOrThrow({
     where: { id: bookingId },
-    data: {
-      status: "confirmed",
-      paidAt: new Date(),
-      expiresAt: null, // Bỏ hạn giữ chỗ
-    },
     include: {
       bookingZones: {
         include: {
