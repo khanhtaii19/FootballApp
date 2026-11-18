@@ -15,6 +15,7 @@ function parseSettingValue(key: SettingKey, raw: string): unknown {
     case "price_7":
     case "hold_timeout_minutes":
     case "cancel_before_hours":
+    case "deposit_percent":
       return Number(raw);
     default:
       return raw;

@@ -39,6 +39,7 @@ async function main() {
     { key: "price_7", value: "500000" },
     { key: "hold_timeout_minutes", value: "15" },
     { key: "cancel_before_hours", value: "24" },
+    { key: "deposit_percent", value: "30" },
   ];
 
   for (const setting of settings) {
