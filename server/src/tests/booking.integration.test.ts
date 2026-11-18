@@ -4,6 +4,8 @@ import app from "../app.js";
 import { generateTokens } from "../lib/jwt.js";
 import prisma from "../lib/prisma.js";
 import { runExpiryJob } from "../services/booking-expiry.service.js";
+import { calculateDeposit, getPaymentCode } from "../lib/payment.js";
+import { parseTlv, verifyVietQrCrc } from "../lib/vietqr.js";
 import {
   createUserWithRole,
   getDescribeDb,
@@ -559,5 +561,207 @@ describeDb("Booking Integration Tests", () => {
       if (previous === undefined) delete process.env.MAX_PENDING_BOOKINGS_PER_USER;
       else process.env.MAX_PENDING_BOOKINGS_PER_USER = previous;
     }
+  });
+
+  // ─── Thanh toán QR, đặt cọc, hoàn cọc ─────────────
+
+  const putSettings = (data: Record<string, unknown>) =>
+    request(app)
+      .put("/api/settings")
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .send(data);
+
+  const getSettings = async () =>
+    (await request(app).get("/api/settings").expect(200)).body.settings;
+
+  const confirmAs = (bookingId: string, body: Record<string, unknown> = {}) =>
+    request(app)
+      .patch(`/api/bookings/${bookingId}/confirm`)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .send(body);
+
+  const cancelAs = (token: string, bookingId: string) =>
+    request(app)
+      .patch(`/api/bookings/${bookingId}/cancel`)
+      .set("Authorization", `Bearer ${token}`);
+
+  const paymentOf = (token: string, bookingId: string) =>
+    request(app)
+      .get(`/api/bookings/${bookingId}/payment`)
+      .set("Authorization", `Bearer ${token}`);
+
+  const BANK = {
+    bank_bin: "970436",
+    bank_account_no: "0123456789",
+    bank_account_name: "NGUYEN VAN A",
+  };
+
+  it("Payment: a booking snapshots the deposit (percent of total, rounded up)", async () => {
+    const settings = await getSettings();
+    const res = await bookAs(customerToken, "five", futureUtc(14, "17:00")).expect(201);
+
+    const { totalAmount, deposit } = res.body.booking;
+    expect(deposit).toBeGreaterThan(0);
+    expect(deposit).toBe(calculateDeposit(totalAmount, settings.deposit_percent));
+  });
+
+  it("Payment: payment info gives a valid VietQR and is hidden from other customers", async () => {
+    await putSettings(BANK).expect(200);
+    const res = await bookAs(customerToken, "five", futureUtc(14, "19:00")).expect(201);
+    const { id, deposit } = res.body.booking;
+
+    const info = (await paymentOf(customerToken, id).expect(200)).body.payment;
+    expect(info.awaitingPayment).toBe(true);
+    expect(info.deposit).toBe(deposit);
+    expect(info.transferContent).toBe(getPaymentCode(id));
+    expect(info.bank).toMatchObject({
+      bin: BANK.bank_bin,
+      accountNo: BANK.bank_account_no,
+    });
+
+    expect(verifyVietQrCrc(info.qrPayload)).toBe(true);
+    const tlv = parseTlv(info.qrPayload);
+    expect(tlv["54"]).toBe(String(deposit));
+    expect(parseTlv(tlv["62"])["08"]).toBe(getPaymentCode(id));
+
+    // Khách khác không xem được; chủ sân xem được
+    const { user: other } = await createUserWithRole("customer", `other-${Date.now()}`);
+    const otherToken = generateTokens({ userId: other.id, role: other.role }).accessToken;
+    await paymentOf(otherToken, id).expect(403);
+    await paymentOf(ownerToken, id).expect(200);
+  });
+
+  it("Payment: no QR once the booking is paid or its hold has expired", async () => {
+    await putSettings(BANK).expect(200);
+
+    const paid = await bookAs(customerToken, "five", futureUtc(14, "21:00")).expect(201);
+    await confirmAs(paid.body.booking.id).expect(200);
+    const paidInfo = (await paymentOf(customerToken, paid.body.booking.id).expect(200))
+      .body.payment;
+    expect(paidInfo.awaitingPayment).toBe(false);
+    expect(paidInfo.qrPayload).toBeNull();
+
+    const stale = await bookAs(customerToken, "five", futureUtc(15, "17:00")).expect(201);
+    await makeStale(stale.body.booking.id);
+    const staleInfo = (await paymentOf(customerToken, stale.body.booking.id).expect(200))
+      .body.payment;
+    expect(staleInfo.awaitingPayment).toBe(false);
+    expect(staleInfo.qrPayload).toBeNull();
+  });
+
+  it("Payment: confirm records the payment and enforces the deposit", async () => {
+    const res = await bookAs(customerToken, "five", futureUtc(15, "19:00")).expect(201);
+    const { id, deposit } = res.body.booking;
+
+    // Thiếu tiền cọc, sai hình thức: bị từ chối, booking vẫn pending
+    await confirmAs(id, { amount: Math.max(deposit - 1000, 1) }).expect(400);
+    await confirmAs(id, { method: "momo" }).expect(400);
+    expect((await prisma.booking.findUniqueOrThrow({ where: { id } })).status).toBe(
+      "pending"
+    );
+
+    const ok = await confirmAs(id, { amount: deposit, transactionId: "FT123456" }).expect(
+      200
+    );
+    expect(ok.body.booking.status).toBe("confirmed");
+    expect(ok.body.booking.paymentCode).toBe(getPaymentCode(id));
+    expect(ok.body.booking.payments).toHaveLength(1);
+    expect(ok.body.booking.payments[0]).toMatchObject({
+      amount: deposit,
+      method: "bank_transfer",
+      status: "completed",
+      transactionId: "FT123456",
+    });
+
+    // Xác nhận lần hai: không tạo thêm khoản thanh toán
+    await confirmAs(id).expect(400);
+    expect(await prisma.payment.count({ where: { bookingId: id } })).toBe(1);
+  });
+
+  it("Refund: cancelling early returns the deposit, and the owner marks it refunded", async () => {
+    const res = await bookAs(customerToken, "five", futureUtc(20, "18:00")).expect(201);
+    const { id, deposit } = res.body.booking;
+    await confirmAs(id).expect(200);
+
+    const cancelled = await cancelAs(customerToken, id).expect(200);
+    expect(cancelled.body.refund).toMatchObject({
+      eligible: true,
+      amount: deposit,
+      reason: "in_time",
+    });
+    expect(cancelled.body.booking.refundAmount).toBe(deposit);
+
+    const before = (await paymentOf(customerToken, id).expect(200)).body.payment;
+    expect(before.refund).toMatchObject({ amount: deposit, due: true, paid: false });
+
+    // Khách không được tự đánh dấu hoàn; chủ sân thì được, và chỉ một lần
+    await request(app)
+      .patch(`/api/bookings/${id}/refund`)
+      .set("Authorization", `Bearer ${customerToken}`)
+      .expect(403);
+
+    const refunded = await request(app)
+      .patch(`/api/bookings/${id}/refund`)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .expect(200);
+    expect(refunded.body.booking.payments[0].status).toBe("refunded");
+
+    await request(app)
+      .patch(`/api/bookings/${id}/refund`)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .expect(409);
+
+    const after = (await paymentOf(customerToken, id).expect(200)).body.payment;
+    expect(after.refund).toMatchObject({ due: false, paid: true });
+  });
+
+  it("Refund: a late cancellation forfeits the deposit, an owner cancellation refunds it", async () => {
+    const previous = (await getSettings()).cancel_before_hours;
+    await putSettings({ cancel_before_hours: 168 }).expect(200); // phải hủy trước 7 ngày
+
+    try {
+      // Khách hủy trong vòng 7 ngày: mất cọc
+      const late = await bookAs(customerToken, "five", futureUtc(2, "18:00")).expect(201);
+      await confirmAs(late.body.booking.id).expect(200);
+      const lateCancel = await cancelAs(customerToken, late.body.booking.id).expect(200);
+      expect(lateCancel.body.refund).toMatchObject({
+        eligible: false,
+        amount: 0,
+        reason: "late_cancel",
+      });
+      await request(app)
+        .patch(`/api/bookings/${late.body.booking.id}/refund`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .expect(400);
+
+      // Chủ sân hủy: luôn hoàn đủ, kể cả sát giờ
+      const byOwner = await bookAs(customerToken, "five", futureUtc(2, "20:00")).expect(
+        201
+      );
+      await confirmAs(byOwner.body.booking.id).expect(200);
+      const ownerCancel = await cancelAs(ownerToken, byOwner.body.booking.id).expect(200);
+      expect(ownerCancel.body.refund).toMatchObject({
+        eligible: true,
+        amount: byOwner.body.booking.deposit,
+        reason: "owner_cancelled",
+      });
+    } finally {
+      await putSettings({ cancel_before_hours: previous }).expect(200);
+    }
+  });
+
+  it("Refund: cancelling an unpaid pending booking owes nothing", async () => {
+    const res = await bookAs(customerToken, "five", futureUtc(16, "18:00")).expect(201);
+    const cancelled = await cancelAs(customerToken, res.body.booking.id).expect(200);
+
+    expect(cancelled.body.refund).toMatchObject({
+      eligible: false,
+      amount: 0,
+      reason: "no_deposit",
+    });
+    await request(app)
+      .patch(`/api/bookings/${res.body.booking.id}/refund`)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .expect(400);
   });
 });
