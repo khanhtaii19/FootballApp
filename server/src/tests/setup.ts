@@ -11,3 +11,7 @@ if (url) {
     );
   }
 }
+
+// Nhiều test tạo hàng chục booking pending từ một khách; nới giới hạn mỗi
+// người để không cản các test đó. Test giới hạn tự đặt lại giá trị riêng.
+process.env.MAX_PENDING_BOOKINGS_PER_USER ??= "1000";

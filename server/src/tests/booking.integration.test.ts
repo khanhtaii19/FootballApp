@@ -3,6 +3,7 @@ import request from "supertest";
 import app from "../app.js";
 import { generateTokens } from "../lib/jwt.js";
 import prisma from "../lib/prisma.js";
+import { runExpiryJob } from "../services/booking-expiry.service.js";
 import {
   createUserWithRole,
   getDescribeDb,
@@ -390,5 +391,173 @@ describeDb("Booking Integration Tests", () => {
 
     // Không có zone nào bị gán trùng
     expect(new Set(assignedZones).size).toBe(assignedZones.length);
+  });
+
+  // ─── Hết hạn giữ chỗ (pending) ────────────────────
+
+  const bookAs = (
+    token: string,
+    fieldType: "five" | "seven",
+    startsAt: string,
+    duration = 60
+  ) =>
+    request(app)
+      .post("/api/bookings")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ fieldType, startsAt, duration });
+
+  // Đẩy hạn giữ chỗ về quá khứ để mô phỏng "khách không thanh toán kịp"
+  const makeStale = (bookingId: string) =>
+    prisma.booking.update({
+      where: { id: bookingId },
+      data: { expiresAt: new Date(Date.now() - 60_000) },
+    });
+
+  it("Expiry: job expires stale pending bookings and releases their zones", async () => {
+    const res = await bookAs(customerToken, "seven", futureUtc(9, "18:00")).expect(201);
+    const id = res.body.booking.id;
+    await makeStale(id);
+
+    expect(await runExpiryJob()).toBe(1);
+
+    const booking = await prisma.booking.findUniqueOrThrow({
+      where: { id },
+      include: { bookingZones: true },
+    });
+    expect(booking.status).toBe("expired");
+    expect(booking.bookingZones).toHaveLength(3);
+    expect(booking.bookingZones.every((z) => !z.isActive)).toBe(true);
+
+    // Lượt thứ hai không còn gì để dọn
+    expect(await runExpiryJob()).toBe(0);
+  });
+
+  it("Expiry: job leaves live pending and confirmed bookings untouched", async () => {
+    const live = await bookAs(customerToken, "five", futureUtc(9, "17:00")).expect(201);
+    const toConfirm = await bookAs(customerToken, "five", futureUtc(9, "19:00")).expect(
+      201
+    );
+    await request(app)
+      .patch(`/api/bookings/${toConfirm.body.booking.id}/confirm`)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .expect(200);
+
+    expect(await runExpiryJob()).toBe(0);
+
+    for (const [id, status] of [
+      [live.body.booking.id, "pending"],
+      [toConfirm.body.booking.id, "confirmed"],
+    ] as const) {
+      const booking = await prisma.booking.findUniqueOrThrow({
+        where: { id },
+        include: { bookingZones: true },
+      });
+      expect(booking.status).toBe(status);
+      expect(booking.bookingZones.every((z) => z.isActive)).toBe(true);
+    }
+  });
+
+  it("Expiry: a stale pending booking no longer blocks a new one (no job needed)", async () => {
+    const startsAt = futureUtc(9, "19:00");
+    const first = await bookAs(customerToken, "seven", startsAt).expect(201);
+    await bookAs(customerToken, "seven", startsAt).expect(201);
+    await bookAs(customerToken, "seven", startsAt).expect(409); // hết 2 mặt cỏ
+
+    await makeStale(first.body.booking.id);
+
+    // Chưa chạy job, nhưng đặt vẫn thành công nhờ dọn ngay khi tạo booking
+    await bookAs(customerToken, "seven", startsAt).expect(201);
+
+    const old = await prisma.booking.findUniqueOrThrow({
+      where: { id: first.body.booking.id },
+    });
+    expect(old.status).toBe("expired");
+  });
+
+  it("Expiry: available slots ignore stale pending bookings", async () => {
+    const startsAt = futureUtc(9, "20:00");
+    const first = await bookAs(customerToken, "seven", startsAt).expect(201);
+    await bookAs(customerToken, "seven", startsAt).expect(201);
+
+    const url = `/api/bookings/available?date=${futureDate(9)}&fieldType=seven&duration=60`;
+    const before = await request(app).get(url).expect(200);
+    expect(
+      before.body.slots.find((s: { startTime: string }) => s.startTime === "20:00")
+    ).toBeUndefined();
+
+    await makeStale(first.body.booking.id);
+
+    const after = await request(app).get(url).expect(200);
+    const slot = after.body.slots.find(
+      (s: { startTime: string }) => s.startTime === "20:00"
+    );
+    expect(slot?.availableCount).toBe(1);
+  });
+
+  it("Expiry: owner cannot confirm a stale pending booking (409)", async () => {
+    const res = await bookAs(customerToken, "five", futureUtc(9, "21:00")).expect(201);
+    const id = res.body.booking.id;
+    await makeStale(id);
+
+    await request(app)
+      .patch(`/api/bookings/${id}/confirm`)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .expect(409);
+
+    const booking = await prisma.booking.findUniqueOrThrow({ where: { id } });
+    expect(booking.status).not.toBe("confirmed");
+
+    // Sau khi job chạy thì đã expired, vẫn không xác nhận được
+    await runExpiryJob();
+    await request(app)
+      .patch(`/api/bookings/${id}/confirm`)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .expect(409);
+  });
+
+  it("Pending limit: a user cannot hold more than the maximum pending bookings (429)", async () => {
+    const previous = process.env.MAX_PENDING_BOOKINGS_PER_USER;
+    process.env.MAX_PENDING_BOOKINGS_PER_USER = "2";
+
+    try {
+      const first = await bookAs(customerToken, "five", futureUtc(10, "17:00")).expect(
+        201
+      );
+      await bookAs(customerToken, "five", futureUtc(10, "19:00")).expect(201);
+      await bookAs(customerToken, "five", futureUtc(10, "21:00")).expect(429);
+
+      // Người dùng khác không bị ảnh hưởng
+      await bookAs(ownerToken, "five", futureUtc(10, "21:00")).expect(201);
+
+      // Hủy một booking thì đặt thêm được
+      await request(app)
+        .patch(`/api/bookings/${first.body.booking.id}/cancel`)
+        .set("Authorization", `Bearer ${customerToken}`)
+        .expect(200);
+      await bookAs(customerToken, "five", futureUtc(10, "22:00")).expect(201);
+    } finally {
+      if (previous === undefined) delete process.env.MAX_PENDING_BOOKINGS_PER_USER;
+      else process.env.MAX_PENDING_BOOKINGS_PER_USER = previous;
+    }
+  });
+
+  it("Pending limit: stale pending bookings do not count towards the limit", async () => {
+    const previous = process.env.MAX_PENDING_BOOKINGS_PER_USER;
+    process.env.MAX_PENDING_BOOKINGS_PER_USER = "1";
+
+    try {
+      const first = await bookAs(customerToken, "five", futureUtc(11, "17:00")).expect(
+        201
+      );
+      await bookAs(customerToken, "five", futureUtc(11, "19:00")).expect(429);
+
+      await makeStale(first.body.booking.id);
+
+      // Booking cũ đã quá hạn nên không còn chiếm "suất" pending
+      await bookAs(customerToken, "five", futureUtc(11, "19:00")).expect(201);
+    } finally {
+      if (previous === undefined) delete process.env.MAX_PENDING_BOOKINGS_PER_USER;
+      else process.env.MAX_PENDING_BOOKINGS_PER_USER = previous;
+    }
   });
 });

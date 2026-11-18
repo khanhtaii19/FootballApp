@@ -126,8 +126,8 @@ npm run dev
 - [x] Phần 1: Nền tảng (repo, Docker, Prisma, CI)
 - [x] Phần 2: Tài khoản và phân quyền
 - [x] Phần 3: Quản lý sân, giá, cấu hình
-- [ ] Phần 4: Lõi đặt sân và chống trùng ⭐
-- [ ] Phần 5: Giữ chỗ tạm, đặt cọc, hủy
+- [x] Phần 4: Lõi đặt sân và chống trùng ⭐
+- [ ] Phần 5: Giữ chỗ tạm, đặt cọc, hủy (đã có: tự hết hạn booking pending, giới hạn pending mỗi người; còn: thanh toán QR/cọc, chính sách hủy)
 - [ ] Phần 6: Giao diện React
 - [ ] Phần 7: Đặt cố định hàng tuần
 - [ ] Phần 8: Deploy & production
