@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import {
   timeToMinutes,
   minutesToTime,
@@ -168,18 +168,17 @@ describe("Price Calculation", () => {
 // ─── Zone conflict logic ─────────────────────────────
 
 describe("Zone Conflict Logic", () => {
-  const hasTimeOverlap = (
-    s1: number, e1: number,
-    s2: number, e2: number
-  ) => s1 < e2 && s2 < e1;
+  const hasTimeOverlap = (s1: number, e1: number, s2: number, e2: number) =>
+    s1 < e2 && s2 < e1;
 
-  const hasZoneConflict = (z1: string[], z2: string[]) =>
-    z1.some((z) => z2.includes(z));
+  const hasZoneConflict = (z1: string[], z2: string[]) => z1.some((z) => z2.includes(z));
 
   const hasConflict = (
     b1: { zones: string[]; start: number; end: number },
     b2: { zones: string[]; start: number; end: number }
-  ) => hasZoneConflict(b1.zones, b2.zones) && hasTimeOverlap(b1.start, b1.end, b2.start, b2.end);
+  ) =>
+    hasZoneConflict(b1.zones, b2.zones) &&
+    hasTimeOverlap(b1.start, b1.end, b2.start, b2.end);
 
   // 4 tình huống từ bảng mục 1.2 trong kế hoạch
 
@@ -232,8 +231,8 @@ describe("Zone Conflict Logic", () => {
 // ─── Booking validator ───────────────────────────────
 
 describe("Booking Validators", () => {
-  let availableSlotsQuerySchema: typeof import("../validators/booking.validator.js")["availableSlotsQuerySchema"];
-  let createBookingSchema: typeof import("../validators/booking.validator.js")["createBookingSchema"];
+  let availableSlotsQuerySchema: (typeof import("../validators/booking.validator.js"))["availableSlotsQuerySchema"];
+  let createBookingSchema: (typeof import("../validators/booking.validator.js"))["createBookingSchema"];
 
   beforeEach(async () => {
     const mod = await import("../validators/booking.validator.js");
@@ -245,7 +244,7 @@ describe("Booking Validators", () => {
     const result = availableSlotsQuerySchema.safeParse({
       date: "2026-12-01",
       fieldType: "five",
-      duration: "60",  // coerce string → number
+      duration: "60", // coerce string → number
     });
     expect(result.success).toBe(true);
   });

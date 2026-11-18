@@ -80,18 +80,14 @@ router.post(
 
 // ─── GET /api/auth/me ────────────────────────────────
 
-router.get(
-  "/auth/me",
-  authenticate,
-  async (req: Request, res: Response) => {
-    try {
-      const user = await authService.getProfile(req.user!.userId);
-      res.json({ user });
-    } catch (error) {
-      handleAuthError(error, res);
-    }
+router.get("/auth/me", authenticate, async (req: Request, res: Response) => {
+  try {
+    const user = await authService.getProfile(req.user!.userId);
+    res.json({ user });
+  } catch (error) {
+    handleAuthError(error, res);
   }
-);
+});
 
 // ─── GET /api/auth/owner-test ────────────────────────
 // Route test: chỉ owner mới truy cập được

@@ -1,10 +1,6 @@
 import prisma from "../lib/prisma.js";
 import { hashPassword, comparePassword } from "../lib/password.js";
-import {
-  generateTokens,
-  verifyRefreshToken,
-  type TokenPayload,
-} from "../lib/jwt.js";
+import { generateTokens, verifyRefreshToken, type TokenPayload } from "../lib/jwt.js";
 import type { RegisterInput, LoginInput } from "../validators/auth.validator.js";
 
 // ─── Custom errors ───────────────────────────────────

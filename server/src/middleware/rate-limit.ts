@@ -17,14 +17,17 @@ interface AttemptRecord {
 const attempts = new Map<string, AttemptRecord>();
 
 // Dọn dẹp bộ nhớ mỗi 5 phút
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, record] of attempts) {
-    if (record.resetAt <= now) {
-      attempts.delete(key);
+setInterval(
+  () => {
+    const now = Date.now();
+    for (const [key, record] of attempts) {
+      if (record.resetAt <= now) {
+        attempts.delete(key);
+      }
     }
-  }
-}, 5 * 60 * 1000);
+  },
+  5 * 60 * 1000
+);
 
 export function rateLimit({
   windowMs = 15 * 60 * 1000, // 15 phút

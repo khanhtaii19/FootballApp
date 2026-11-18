@@ -1,3 +1,4 @@
+import { describe } from "vitest";
 import prisma from "../../lib/prisma.js";
 import { hashPassword } from "../../lib/password.js";
 
@@ -12,10 +13,7 @@ export async function resetUsers() {
   await prisma.user.deleteMany();
 }
 
-export async function createUserWithRole(
-  role: "customer" | "owner",
-  suffix: string
-) {
+export async function createUserWithRole(role: "customer" | "owner", suffix: string) {
   const password = "TestPass123";
   const passwordHash = await hashPassword(password);
 
@@ -29,4 +27,23 @@ export async function createUserWithRole(
   });
 
   return { user, password };
+}
+
+/**
+ * Trả về `describe` nếu DB test kết nối được.
+ * - Local: không có DB thì bỏ qua (describe.skip) để chạy được unit test.
+ * - CI: không có DB là lỗi cấu hình, phải đỏ chứ không được xanh giả.
+ */
+export async function getDescribeDb() {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    return describe;
+  } catch (error) {
+    if (process.env.CI) {
+      throw new Error("Integration test cần database nhưng không kết nối được trong CI", {
+        cause: error,
+      });
+    }
+    return describe.skip;
+  }
 }

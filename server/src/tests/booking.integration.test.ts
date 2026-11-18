@@ -1,22 +1,16 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import request from "supertest";
 import app from "../app.js";
 import { generateTokens } from "../lib/jwt.js";
 import prisma from "../lib/prisma.js";
-import { createUserWithRole, resetBookingData, resetUsers } from "./helpers/test-db.js";
+import {
+  createUserWithRole,
+  getDescribeDb,
+  resetBookingData,
+  resetUsers,
+} from "./helpers/test-db.js";
 
-// ─── Chỉ chạy khi có DB ─────────────────────────────
-
-async function canReachDatabase() {
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const describeDb = (await canReachDatabase()) ? describe : describe.skip;
+const describeDb = await getDescribeDb();
 
 // ─── Helpers ─────────────────────────────────────────
 
@@ -50,7 +44,10 @@ describeDb("Booking Integration Tests", () => {
     const { user: customer } = await createUserWithRole("customer", suffix);
     const { user: owner } = await createUserWithRole("owner", suffix);
     customerId = customer.id;
-    customerToken = generateTokens({ userId: customer.id, role: customer.role }).accessToken;
+    customerToken = generateTokens({
+      userId: customer.id,
+      role: customer.role,
+    }).accessToken;
     ownerToken = generateTokens({ userId: owner.id, role: owner.role }).accessToken;
   });
 
@@ -158,30 +155,25 @@ describeDb("Booking Integration Tests", () => {
 
   // ─── 4 tình huống bảng 1.2 ───────────────────────
 
-  it("Case 1: rejects sân 5 on A2 when sân 7#1 already booked (chung vùng + giờ chồng)", async () => {
+  it("Case 1: sân 7 chiếm cả mặt cỏ nên chỉ còn 3 vùng sân 5, vùng thứ 4 bị từ chối (409)", async () => {
     const startsAt = futureUtc(8, "18:00");
+    const book = (fieldType: "five" | "seven") =>
+      request(app)
+        .post("/api/bookings")
+        .set("Authorization", `Bearer ${customerToken}`)
+        .send({ fieldType, startsAt, duration: 60 });
 
-    // Book sân 7 → chiếm 3 vùng surface A
-    const first = await request(app)
-      .post("/api/bookings")
-      .set("Authorization", `Bearer ${customerToken}`)
-      .send({ fieldType: "seven", startsAt, duration: 60 })
-      .expect(201);
+    const seven = await book("seven").expect(201);
+    const sevenSurface = seven.body.booking.bookingZones[0].zone.surface;
 
-    const bookedSurface = first.body.booking.bookingZones[0].zone.surface;
+    // 3 sân 5 còn lại đều rơi vào mặt cỏ KHÁC
+    for (let i = 0; i < 3; i++) {
+      const five = await book("five").expect(201);
+      expect(five.body.booking.bookingZones[0].zone.surface).not.toBe(sevenSurface);
+    }
 
-    // Kiểm tra: sân 5 cùng thời gian → vẫn có thể book (vùng khác surface)
-    // Nhưng: đã chiếm 3 vùng surface A hoặc B, nên availableCount giảm
-    const date = futureDate(8);
-    const slotsRes = await request(app)
-      .get(`/api/bookings/available?date=${date}&fieldType=five&duration=60`)
-      .expect(200);
-
-    const slot = slotsRes.body.slots.find(
-      (s: { startTime: string }) => s.startTime === "18:00"
-    );
-    // 6 - 3 = 3 vùng còn trống (surface kia)
-    expect(slot.availableCount).toBe(3);
+    // Hết vùng: sân 5 thứ 4 phải bị từ chối
+    await book("five").expect(409);
   });
 
   it("Case 2: allows sân 5 on B1 when sân 7#1 booked on surface A (khác mặt cỏ)", async () => {
@@ -392,10 +384,8 @@ describeDb("Booking Integration Tests", () => {
     const successes = results.filter((r) => r.status === 201);
 
     // Thu thập tất cả zone đã gán
-    const assignedZones = successes.flatMap(
-      (r) => r.body.booking.bookingZones.map(
-        (bz: { zone: { id: string } }) => bz.zone.id
-      )
+    const assignedZones = successes.flatMap((r) =>
+      r.body.booking.bookingZones.map((bz: { zone: { id: string } }) => bz.zone.id)
     );
 
     // Không có zone nào bị gán trùng

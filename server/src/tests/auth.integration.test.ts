@@ -1,23 +1,10 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import request from "supertest";
 import app from "../app.js";
-import prisma from "../lib/prisma.js";
 import { generateTokens } from "../lib/jwt.js";
-import {
-  createUserWithRole,
-  resetUsers,
-} from "./helpers/test-db.js";
+import { createUserWithRole, getDescribeDb, resetUsers } from "./helpers/test-db.js";
 
-async function canReachDatabase() {
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const describeDb = (await canReachDatabase()) ? describe : describe.skip;
+const describeDb = await getDescribeDb();
 
 describeDb("Auth API (integration)", () => {
   beforeAll(async () => {

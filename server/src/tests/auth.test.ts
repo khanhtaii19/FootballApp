@@ -1,9 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import {
-  generateTokens,
-  verifyAccessToken,
-  verifyRefreshToken,
-} from "../lib/jwt.js";
+import { describe, it, expect, beforeEach } from "vitest";
+import { generateTokens, verifyAccessToken, verifyRefreshToken } from "../lib/jwt.js";
 import { hashPassword, comparePassword } from "../lib/password.js";
 
 // ─── JWT Tests ───────────────────────────────────────
@@ -83,8 +79,8 @@ describe("Password Utils", () => {
 
 describe("Auth Validators", () => {
   // Import dynamically to avoid module resolution issues
-  let registerSchema: typeof import("../validators/auth.validator.js")["registerSchema"];
-  let loginSchema: typeof import("../validators/auth.validator.js")["loginSchema"];
+  let registerSchema: (typeof import("../validators/auth.validator.js"))["registerSchema"];
+  let loginSchema: (typeof import("../validators/auth.validator.js"))["loginSchema"];
 
   beforeEach(async () => {
     const mod = await import("../validators/auth.validator.js");

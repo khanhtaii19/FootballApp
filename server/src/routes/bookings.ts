@@ -54,10 +54,7 @@ router.post(
   validate(createBookingSchema),
   async (req: Request, res: Response) => {
     try {
-      const booking = await bookingService.createBooking(
-        req.user!.userId,
-        req.body
-      );
+      const booking = await bookingService.createBooking(req.user!.userId, req.body);
       res.status(201).json({
         message: "Đặt sân thành công",
         booking,
@@ -71,41 +68,30 @@ router.post(
 // ─── GET /api/bookings ──────────────────────────────
 // Danh sách booking: customer thấy của mình, owner thấy tất cả
 
-router.get(
-  "/bookings",
-  authenticate,
-  async (req: Request, res: Response) => {
-    try {
-      const bookings = await bookingService.listBookings(
-        req.user!.userId,
-        req.user!.role
-      );
-      res.json({ bookings });
-    } catch (error) {
-      handleBookingError(error, res);
-    }
+router.get("/bookings", authenticate, async (req: Request, res: Response) => {
+  try {
+    const bookings = await bookingService.listBookings(req.user!.userId, req.user!.role);
+    res.json({ bookings });
+  } catch (error) {
+    handleBookingError(error, res);
   }
-);
+});
 
 // ─── GET /api/bookings/:id ──────────────────────────
 // Chi tiết booking
 
-router.get(
-  "/bookings/:id",
-  authenticate,
-  async (req: Request, res: Response) => {
-    try {
-      const booking = await bookingService.getBookingById(
-        req.params.id,
-        req.user!.userId,
-        req.user!.role
-      );
-      res.json({ booking });
-    } catch (error) {
-      handleBookingError(error, res);
-    }
+router.get("/bookings/:id", authenticate, async (req: Request, res: Response) => {
+  try {
+    const booking = await bookingService.getBookingById(
+      String(req.params.id),
+      req.user!.userId,
+      req.user!.role
+    );
+    res.json({ booking });
+  } catch (error) {
+    handleBookingError(error, res);
   }
-);
+});
 
 // ─── PATCH /api/bookings/:id/cancel ─────────────────
 // Hủy booking (customer hoặc owner)
@@ -116,7 +102,7 @@ router.patch(
   async (req: Request, res: Response) => {
     try {
       const booking = await bookingService.cancelBooking(
-        req.params.id,
+        String(req.params.id),
         req.user!.userId,
         req.user!.role
       );
@@ -139,7 +125,7 @@ router.patch(
   authorize("owner"),
   async (req: Request, res: Response) => {
     try {
-      const booking = await bookingService.confirmBooking(req.params.id);
+      const booking = await bookingService.confirmBooking(String(req.params.id));
       res.json({
         message: "Đã xác nhận booking",
         booking,

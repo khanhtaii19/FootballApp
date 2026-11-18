@@ -1,9 +1,10 @@
-import { Prisma } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma.js";
 import { getAppSettings } from "./settings.service.js";
+import { isOverlapConstraintError } from "../lib/db-errors.js";
+import { lockBookingCreation } from "../lib/db-locks.js";
 import {
   vietnamToUtc,
-  utcToVietnamTime,
   minutesToTime,
   generateCandidateTimes,
   isWithinOperatingHours,
@@ -23,22 +24,6 @@ export class BookingError extends Error {
     super(message);
     this.name = "BookingError";
   }
-}
-
-// ─── Kiểm tra lỗi exclusion constraint ──────────────
-
-function isOverlapConstraintError(error: unknown): boolean {
-  if (error instanceof Prisma.PrismaClientKnownRequestError) {
-    if (error.code === "P2002") return true;
-  }
-  if (error instanceof Error) {
-    return (
-      error.message.includes("no_overlap") ||
-      error.message.includes("exclusion") ||
-      error.message.includes("23P01")
-    );
-  }
-  return false;
 }
 
 // ─── Types ───────────────────────────────────────────
@@ -72,9 +57,12 @@ function hasTimeOverlap(
 
 // ─── API: Xem giờ trống ──────────────────────────────
 
-export async function getAvailableSlots(
-  query: AvailableSlotsQuery
-): Promise<{ date: string; fieldType: string; duration: number; slots: AvailableSlot[] }> {
+export async function getAvailableSlots(query: AvailableSlotsQuery): Promise<{
+  date: string;
+  fieldType: string;
+  duration: number;
+  slots: AvailableSlot[];
+}> {
   const settings = await getAppSettings();
   const zones = await prisma.zone.findMany({ orderBy: { name: "asc" } });
 
@@ -94,7 +82,12 @@ export async function getAvailableSlots(
   );
 
   if (candidates.length === 0) {
-    return { date: query.date, fieldType: query.fieldType, duration: query.duration, slots: [] };
+    return {
+      date: query.date,
+      fieldType: query.fieldType,
+      duration: query.duration,
+      slots: [],
+    };
   }
 
   // Khoảng thời gian cả ngày (UTC) để query 1 lần
@@ -155,7 +148,12 @@ export async function getAvailableSlots(
     }
   }
 
-  return { date: query.date, fieldType: query.fieldType, duration: query.duration, slots };
+  return {
+    date: query.date,
+    fieldType: query.fieldType,
+    duration: query.duration,
+    slots,
+  };
 }
 
 // ─── API: Tạo booking ───────────────────────────────
@@ -166,9 +164,7 @@ export async function createBooking(userId: string, input: CreateBookingInput) {
 
   // Validate thời lượng
   if (!settings.allowed_durations.includes(input.duration)) {
-    throw new BookingError(
-      `Thời lượng ${input.duration} phút không được phép`
-    );
+    throw new BookingError(`Thời lượng ${input.duration} phút không được phép`);
   }
 
   const startsAt = new Date(input.startsAt);
@@ -194,101 +190,114 @@ export async function createBooking(userId: string, input: CreateBookingInput) {
   }
 
   // Tính giá (chụp lúc đặt)
-  const pricePerHour =
-    input.fieldType === "five" ? settings.price_5 : settings.price_7;
+  const pricePerHour = input.fieldType === "five" ? settings.price_5 : settings.price_7;
   const totalAmount = Math.round(pricePerHour * (input.duration / 60));
 
   // Hạn giữ chỗ
-  const expiresAt = new Date(
-    Date.now() + settings.hold_timeout_minutes * 60 * 1000
-  );
+  const expiresAt = new Date(Date.now() + settings.hold_timeout_minutes * 60 * 1000);
 
-  try {
-    return await prisma.$transaction(async (tx) => {
-      // Tìm booking_zones active chồng thời gian
-      const busy = await tx.bookingZone.findMany({
-        where: {
-          isActive: true,
-          startsAt: { lt: endsAt },
-          endsAt: { gt: startsAt },
-        },
-        select: { zoneId: true },
-      });
-      const busyZoneIds = new Set(busy.map((b) => b.zoneId));
+  // Khi nhiều request cùng chọn một vùng, constraint chỉ cho một request thắng.
+  // Các request thua KHÔNG được báo hết sân ngay: transaction của chúng đã bị
+  // hủy nên phải mở transaction mới, đọc lại vùng bận và chọn vùng khác.
+  // Mỗi vòng có ít nhất một request thành công nên số vòng tối đa ~ số vùng.
+  const maxAttempts = zones.length + 2;
 
-      // Chọn vùng
-      let selectedZoneIds: string[];
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await tryCreateBooking();
+    } catch (error) {
+      if (!isOverlapConstraintError(error)) throw error;
+      // Lùi một chút ngẫu nhiên để các request đang tranh nhau lệch nhịp
+      await new Promise((r) => setTimeout(r, Math.random() * 20));
+    }
+  }
 
-      if (input.fieldType === "five") {
-        // Tìm bất kỳ vùng rảnh nào
-        const freeZone = zones.find((z) => !busyZoneIds.has(z.id));
-        if (!freeZone) {
-          throw new BookingError("Không còn sân 5 trống trong khung giờ này", 409);
-        }
-        selectedZoneIds = [freeZone.id];
-      } else {
-        // Tìm mặt cỏ rảnh (cả 3 vùng phải free)
-        let freeSurfaceZones: typeof zones | null = null;
-        for (const surface of ["A", "B"]) {
-          const surfaceZones = zones.filter((z) => z.surface === surface);
-          const allFree = surfaceZones.every((z) => !busyZoneIds.has(z.id));
-          if (allFree) {
-            freeSurfaceZones = surfaceZones;
-            break;
+  throw new BookingError("Vừa có người đặt trước, mời chọn giờ khác", 409);
+
+  function tryCreateBooking() {
+    return prisma.$transaction(
+      async (tx) => {
+        // Xếp hàng: chỉ một transaction được chọn vùng và ghi tại một thời điểm
+        await lockBookingCreation(tx);
+
+        // Tìm booking_zones active chồng thời gian
+        const busy = await tx.bookingZone.findMany({
+          where: {
+            isActive: true,
+            startsAt: { lt: endsAt },
+            endsAt: { gt: startsAt },
+          },
+          select: { zoneId: true },
+        });
+        const busyZoneIds = new Set(busy.map((b) => b.zoneId));
+
+        // Chọn vùng
+        let selectedZoneIds: string[];
+
+        if (input.fieldType === "five") {
+          // Tìm bất kỳ vùng rảnh nào
+          const freeZone = zones.find((z) => !busyZoneIds.has(z.id));
+          if (!freeZone) {
+            throw new BookingError("Không còn sân 5 trống trong khung giờ này", 409);
           }
+          selectedZoneIds = [freeZone.id];
+        } else {
+          // Tìm mặt cỏ rảnh (cả 3 vùng phải free)
+          let freeSurfaceZones: typeof zones | null = null;
+          for (const surface of ["A", "B"]) {
+            const surfaceZones = zones.filter((z) => z.surface === surface);
+            const allFree = surfaceZones.every((z) => !busyZoneIds.has(z.id));
+            if (allFree) {
+              freeSurfaceZones = surfaceZones;
+              break;
+            }
+          }
+          if (!freeSurfaceZones) {
+            throw new BookingError("Không còn sân 7 trống trong khung giờ này", 409);
+          }
+          selectedZoneIds = freeSurfaceZones.map((z) => z.id);
         }
-        if (!freeSurfaceZones) {
-          throw new BookingError("Không còn sân 7 trống trong khung giờ này", 409);
-        }
-        selectedZoneIds = freeSurfaceZones.map((z) => z.id);
-      }
 
-      // Tạo booking
-      const booking = await tx.booking.create({
-        data: {
-          userId,
-          fieldType: input.fieldType,
-          startsAt,
-          endsAt,
-          status: "pending",
-          totalAmount,
-          expiresAt,
-          note: input.note,
-        },
-      });
+        // Tạo booking
+        const booking = await tx.booking.create({
+          data: {
+            userId,
+            fieldType: input.fieldType,
+            startsAt,
+            endsAt,
+            status: "pending",
+            totalAmount,
+            expiresAt,
+            note: input.note,
+          },
+        });
 
-      // Tạo booking_zones (chốt chặn cuối = exclusion constraint)
-      await tx.bookingZone.createMany({
-        data: selectedZoneIds.map((zoneId) => ({
-          bookingId: booking.id,
-          zoneId,
-          startsAt,
-          endsAt,
-          isActive: true,
-        })),
-      });
+        // Tạo booking_zones (chốt chặn cuối = exclusion constraint)
+        await tx.bookingZone.createMany({
+          data: selectedZoneIds.map((zoneId) => ({
+            bookingId: booking.id,
+            zoneId,
+            startsAt,
+            endsAt,
+            isActive: true,
+          })),
+        });
 
-      // Trả về booking đầy đủ
-      return tx.booking.findUniqueOrThrow({
-        where: { id: booking.id },
-        include: {
-          bookingZones: {
-            include: {
-              zone: { select: { id: true, name: true, surface: true } },
+        // Trả về booking đầy đủ
+        return tx.booking.findUniqueOrThrow({
+          where: { id: booking.id },
+          include: {
+            bookingZones: {
+              include: {
+                zone: { select: { id: true, name: true, surface: true } },
+              },
             },
           },
-        },
-      });
-    });
-  } catch (error) {
-    // Bắt lỗi exclusion constraint (race condition bị chặn ở DB)
-    if (isOverlapConstraintError(error)) {
-      throw new BookingError(
-        "Vừa có người đặt trước, mời chọn giờ khác",
-        409
-      );
-    }
-    throw error;
+        });
+      },
+      // Chờ khóa xếp hàng có thể lâu hơn mặc định (2s/5s) khi runner chậm
+      { maxWait: 15_000, timeout: 20_000 }
+    );
   }
 }
 
@@ -410,7 +419,11 @@ export async function listBookings(userId: string, userRole: string) {
 
 // ─── API: Chi tiết booking ──────────────────────────
 
-export async function getBookingById(bookingId: string, userId: string, userRole: string) {
+export async function getBookingById(
+  bookingId: string,
+  userId: string,
+  userRole: string
+) {
   const booking = await prisma.booking.findUnique({
     where: { id: bookingId },
     include: {

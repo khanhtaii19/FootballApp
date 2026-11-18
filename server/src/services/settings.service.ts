@@ -50,9 +50,10 @@ export async function getAppSettings(): Promise<AppSettings> {
 export async function updateAppSettings(
   partial: Partial<AppSettings>
 ): Promise<AppSettings> {
-  const entries = Object.entries(partial).filter(
-    ([, value]) => value !== undefined
-  ) as [SettingKey, unknown][];
+  const entries = Object.entries(partial).filter(([, value]) => value !== undefined) as [
+    SettingKey,
+    unknown,
+  ][];
 
   if (entries.length === 0) {
     return getAppSettings();
