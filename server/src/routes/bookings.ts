@@ -4,6 +4,7 @@ import { validate } from "../middleware/validate.js";
 import {
   availableSlotsQuerySchema,
   createBookingSchema,
+  confirmBookingSchema,
 } from "../validators/booking.validator.js";
 import * as bookingService from "../services/booking.service.js";
 import { BookingError } from "../services/booking.service.js";
@@ -101,7 +102,7 @@ router.patch(
   authenticate,
   async (req: Request, res: Response) => {
     try {
-      const booking = await bookingService.cancelBooking(
+      const { booking, refund } = await bookingService.cancelBooking(
         String(req.params.id),
         req.user!.userId,
         req.user!.role
@@ -109,6 +110,7 @@ router.patch(
       res.json({
         message: "Đã hủy booking",
         booking,
+        refund,
       });
     } catch (error) {
       handleBookingError(error, res);
@@ -125,9 +127,60 @@ router.patch(
   authorize("owner"),
   async (req: Request, res: Response) => {
     try {
-      const booking = await bookingService.confirmBooking(String(req.params.id));
+      const parsed = confirmBookingSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "Dữ liệu không hợp lệ",
+          details: parsed.error.errors.map((e) => ({
+            field: e.path.join("."),
+            message: e.message,
+          })),
+        });
+        return;
+      }
+
+      const booking = await bookingService.confirmBooking(
+        String(req.params.id),
+        parsed.data
+      );
       res.json({
         message: "Đã xác nhận booking",
+        booking,
+      });
+    } catch (error) {
+      handleBookingError(error, res);
+    }
+  }
+);
+
+// ─── GET /api/bookings/:id/payment ──────────────────
+// Thông tin chuyển khoản: số tiền cọc, nội dung, chuỗi QR VietQR
+
+router.get("/bookings/:id/payment", authenticate, async (req: Request, res: Response) => {
+  try {
+    const payment = await bookingService.getPaymentInfo(
+      String(req.params.id),
+      req.user!.userId,
+      req.user!.role
+    );
+    res.json({ payment });
+  } catch (error) {
+    handleBookingError(error, res);
+  }
+});
+
+// ─── PATCH /api/bookings/:id/refund ─────────────────
+// Chủ sân đánh dấu đã hoàn cọc cho khách (owner only)
+
+router.patch(
+  "/bookings/:id/refund",
+  authenticate,
+  authorize("owner"),
+  async (req: Request, res: Response) => {
+    try {
+      const booking = await bookingService.markRefunded(String(req.params.id));
+      res.json({
+        message: "Đã ghi nhận hoàn cọc",
         booking,
       });
     } catch (error) {

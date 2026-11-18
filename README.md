@@ -96,6 +96,23 @@ Giao diện cấu hình (Phần 3): chạy client, đăng nhập chủ sân → 
 | GET | `/api/zones` | Công khai | 6 vùng A1–B3 |
 | GET/POST/DELETE | `/api/blocks` | Owner | Khóa vùng (bảo trì) |
 
+### API Phần 5: thanh toán và đặt cọc (tóm tắt)
+
+Luồng: khách đặt sân (giữ chỗ tạm) → xem QR chuyển khoản → chủ sân đối chiếu sao kê và xác nhận đã nhận cọc.
+
+| Method | Endpoint | Quyền | Mô tả |
+|---|---|---|---|
+| GET | `/api/bookings/:id/payment` | Chủ booking / Owner | Tiền cọc, nội dung chuyển khoản, chuỗi QR VietQR (`qrPayload`), thông tin hoàn cọc |
+| PATCH | `/api/bookings/:id/confirm` | Owner | Xác nhận đã nhận cọc. Body tùy chọn: `amount`, `method` (`bank_transfer`/`cash`), `transactionId` |
+| PATCH | `/api/bookings/:id/cancel` | Chủ booking / Owner | Hủy; trả thêm `refund` (có hoàn cọc không, bao nhiêu, lý do) |
+| PATCH | `/api/bookings/:id/refund` | Owner | Đánh dấu đã hoàn cọc cho khách |
+
+- **Tiền cọc** = `deposit_percent`% tổng tiền (mặc định 30%), làm tròn lên 1.000đ, chụp vào booking lúc đặt.
+- **Chính sách hoàn cọc:** khách hủy trước giờ đá ít nhất `cancel_before_hours` giờ thì được hoàn đủ cọc, hủy sát giờ thì mất cọc; chủ sân hủy thì luôn hoàn.
+- **Cấu hình ngân hàng** (Owner, `PUT /api/settings`): `bank_bin` (6 số), `bank_account_no`, `bank_account_name`. Chưa cấu hình thì API không trả `qrPayload`.
+- **Mã nội dung chuyển khoản** (`SB` + 8 ký tự, ví dụ `SBH3IJ4K5L`) có trong mọi booking để chủ sân đối chiếu sao kê.
+- Client chỉ cần vẽ `qrPayload` thành ảnh QR (ví dụ bằng `qrcode.react`); khách quét bằng app ngân hàng bất kỳ, số tiền và nội dung được điền sẵn.
+
 ## 🧪 Testing
 
 ```bash
@@ -127,7 +144,7 @@ npm run dev
 - [x] Phần 2: Tài khoản và phân quyền
 - [x] Phần 3: Quản lý sân, giá, cấu hình
 - [x] Phần 4: Lõi đặt sân và chống trùng ⭐
-- [ ] Phần 5: Giữ chỗ tạm, đặt cọc, hủy (đã có: tự hết hạn booking pending, giới hạn pending mỗi người; còn: thanh toán QR/cọc, chính sách hủy)
+- [x] Phần 5: Giữ chỗ tạm, đặt cọc, hủy (tự hết hạn pending, giới hạn pending, QR VietQR + tiền cọc, hoàn cọc theo chính sách hủy; thanh toán tự động qua PayOS/webhook: chưa làm)
 - [ ] Phần 6: Giao diện React
 - [ ] Phần 7: Đặt cố định hàng tuần
 - [ ] Phần 8: Deploy & production

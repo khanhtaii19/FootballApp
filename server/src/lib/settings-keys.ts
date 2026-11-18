@@ -7,6 +7,10 @@ export const SETTING_KEYS = [
   "price_7",
   "hold_timeout_minutes",
   "cancel_before_hours",
+  "deposit_percent",
+  "bank_bin",
+  "bank_account_no",
+  "bank_account_name",
 ] as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[number];
@@ -20,6 +24,10 @@ export interface AppSettings {
   price_7: number;
   hold_timeout_minutes: number;
   cancel_before_hours: number;
+  deposit_percent: number; // % tiền cọc trên tổng tiền
+  bank_bin: string; // Mã BIN ngân hàng nhận cọc (6 số)
+  bank_account_no: string;
+  bank_account_name: string;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -31,4 +39,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   price_7: 500_000,
   hold_timeout_minutes: 15,
   cancel_before_hours: 24,
+  deposit_percent: 30,
+  bank_bin: "",
+  bank_account_no: "",
+  bank_account_name: "",
 };

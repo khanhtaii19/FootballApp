@@ -78,6 +78,8 @@ model Booking {
   deposit     Int           @default(0) // Tiền cọc
   paidAt      DateTime?     @map("paid_at") @db.Timestamptz
   expiresAt   DateTime?     @map("expires_at") @db.Timestamptz // Hạn giữ chỗ
+  cancelledAt  DateTime?    @map("cancelled_at") @db.Timestamptz
+  refundAmount Int          @default(0) @map("refund_amount") // Tiền cọc phải hoàn khi hủy (VND)
   note        String?
   createdAt   DateTime      @default(now()) @map("created_at")
   updatedAt   DateTime      @updatedAt @map("updated_at")

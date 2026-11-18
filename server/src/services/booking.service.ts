@@ -4,6 +4,8 @@ import { getAppSettings } from "./settings.service.js";
 import { isOverlapConstraintError } from "../lib/db-errors.js";
 import { lockBookingCreation } from "../lib/db-locks.js";
 import { getMaxPendingPerUser } from "../lib/booking-limits.js";
+import { calculateDeposit, evaluateRefund, getPaymentCode } from "../lib/payment.js";
+import { buildVietQrPayload } from "../lib/vietqr.js";
 import { expireStaleBookings, liveHoldFilter } from "./booking-expiry.service.js";
 import {
   vietnamToUtc,
@@ -26,6 +28,25 @@ export class BookingError extends Error {
     super(message);
     this.name = "BookingError";
   }
+}
+
+// ─── Helpers thanh toán ──────────────────────────────
+
+const PAYMENT_SELECT = {
+  select: {
+    id: true,
+    amount: true,
+    method: true,
+    status: true,
+    transactionId: true,
+    createdAt: true,
+  },
+  orderBy: { createdAt: "asc" },
+} as const;
+
+/** Gắn mã nội dung chuyển khoản (suy ra từ id) vào booking trả về cho client. */
+function withPaymentCode<T extends { id: string }>(booking: T) {
+  return { ...booking, paymentCode: getPaymentCode(booking.id) };
 }
 
 // ─── Types ───────────────────────────────────────────
@@ -194,6 +215,7 @@ export async function createBooking(userId: string, input: CreateBookingInput) {
   // Tính giá (chụp lúc đặt)
   const pricePerHour = input.fieldType === "five" ? settings.price_5 : settings.price_7;
   const totalAmount = Math.round(pricePerHour * (input.duration / 60));
+  const deposit = calculateDeposit(totalAmount, settings.deposit_percent);
 
   // Hạn giữ chỗ
   const expiresAt = new Date(Date.now() + settings.hold_timeout_minutes * 60 * 1000);
@@ -284,6 +306,7 @@ export async function createBooking(userId: string, input: CreateBookingInput) {
             endsAt,
             status: "pending",
             totalAmount,
+            deposit,
             expiresAt,
             note: input.note,
           },
@@ -323,7 +346,7 @@ export async function createBooking(userId: string, input: CreateBookingInput) {
 export async function cancelBooking(bookingId: string, userId: string, userRole: string) {
   const booking = await prisma.booking.findUnique({
     where: { id: bookingId },
-    include: { bookingZones: true },
+    include: { payments: true },
   });
 
   if (!booking) {
@@ -343,11 +366,29 @@ export async function cancelBooking(bookingId: string, userId: string, userRole:
     throw new BookingError("Không thể hủy booking đã hoàn thành", 400);
   }
 
-  return prisma.$transaction(async (tx) => {
-    await tx.booking.update({
-      where: { id: bookingId },
-      data: { status: "cancelled" },
+  // Chính sách hoàn cọc: hủy sớm hơn X giờ trước giờ đá thì hoàn, chủ sân hủy thì luôn hoàn
+  const settings = await getAppSettings();
+  const now = new Date();
+  const depositPaid = booking.payments
+    .filter((p) => p.status === "completed")
+    .reduce((sum, p) => sum + p.amount, 0);
+  const refund = evaluateRefund({
+    depositPaid,
+    startsAt: booking.startsAt,
+    now,
+    cancelBeforeHours: settings.cancel_before_hours,
+    cancelledByOwner: userRole === "owner",
+  });
+
+  const updated = await prisma.$transaction(async (tx) => {
+    // Chỉ hủy khi booking vẫn đang pending/confirmed (tránh hủy chồng lên thay đổi vừa xảy ra)
+    const { count } = await tx.booking.updateMany({
+      where: { id: bookingId, status: { in: ["pending", "confirmed"] } },
+      data: { status: "cancelled", cancelledAt: now, refundAmount: refund.amount },
     });
+    if (count === 0) {
+      throw new BookingError("Booking vừa thay đổi trạng thái, vui lòng tải lại", 409);
+    }
 
     // Nhả vùng
     await tx.bookingZone.updateMany({
@@ -363,28 +404,70 @@ export async function cancelBooking(bookingId: string, userId: string, userRole:
             zone: { select: { id: true, name: true, surface: true } },
           },
         },
+        payments: PAYMENT_SELECT,
       },
     });
   });
+
+  return { booking: withPaymentCode(updated), refund };
 }
 
 // ─── API: Xác nhận booking (owner) ──────────────────
 
-export async function confirmBooking(bookingId: string) {
+export interface ConfirmBookingInput {
+  amount?: number; // Số tiền thực nhận; mặc định = tiền cọc yêu cầu
+  method?: "bank_transfer" | "cash";
+  transactionId?: string; // Mã giao dịch ngân hàng (nếu có)
+}
+
+export async function confirmBooking(bookingId: string, input: ConfirmBookingInput = {}) {
+  const existing = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    select: { deposit: true },
+  });
+  if (!existing) {
+    throw new BookingError("Không tìm thấy booking", 404);
+  }
+
+  const amount = input.amount ?? existing.deposit;
+  if (amount < existing.deposit) {
+    throw new BookingError(
+      `Số tiền nhận được (${amount}đ) chưa đủ tiền cọc yêu cầu (${existing.deposit}đ)`,
+      400
+    );
+  }
+
   const now = new Date();
 
-  // Một câu lệnh nguyên tử: chỉ xác nhận khi vẫn đang pending VÀ chưa quá hạn.
-  // Tránh việc xác nhận một booking mà job nền vừa nhả chỗ cho người khác.
-  const { count } = await prisma.booking.updateMany({
-    where: {
-      id: bookingId,
-      status: "pending",
-      OR: [{ expiresAt: null }, { expiresAt: { gte: now } }],
-    },
-    data: { status: "confirmed", paidAt: now, expiresAt: null },
+  // Xác nhận + ghi nhận khoản thanh toán trong cùng một transaction.
+  // Điều kiện nguyên tử: chỉ xác nhận khi vẫn đang pending VÀ chưa quá hạn, để không
+  // xác nhận một booking mà job nền vừa nhả chỗ cho người khác.
+  const confirmed = await prisma.$transaction(async (tx) => {
+    const { count } = await tx.booking.updateMany({
+      where: {
+        id: bookingId,
+        status: "pending",
+        OR: [{ expiresAt: null }, { expiresAt: { gte: now } }],
+      },
+      data: { status: "confirmed", paidAt: now, expiresAt: null },
+    });
+    if (count === 0) return false;
+
+    if (amount > 0) {
+      await tx.payment.create({
+        data: {
+          bookingId,
+          amount,
+          method: input.method ?? "bank_transfer",
+          status: "completed",
+          transactionId: input.transactionId,
+        },
+      });
+    }
+    return true;
   });
 
-  if (count === 0) {
+  if (!confirmed) {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
       select: { status: true },
@@ -403,7 +486,7 @@ export async function confirmBooking(bookingId: string) {
     );
   }
 
-  return prisma.booking.findUniqueOrThrow({
+  const booking = await prisma.booking.findUniqueOrThrow({
     where: { id: bookingId },
     include: {
       bookingZones: {
@@ -414,8 +497,107 @@ export async function confirmBooking(bookingId: string) {
       user: {
         select: { id: true, name: true, email: true, phone: true },
       },
+      payments: PAYMENT_SELECT,
     },
   });
+  return withPaymentCode(booking);
+}
+
+// ─── API: Thông tin thanh toán (QR) ──────────────────
+
+export async function getPaymentInfo(
+  bookingId: string,
+  userId: string,
+  userRole: string
+) {
+  const booking = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    include: { payments: PAYMENT_SELECT },
+  });
+
+  if (!booking) {
+    throw new BookingError("Không tìm thấy booking", 404);
+  }
+  if (userRole === "customer" && booking.userId !== userId) {
+    throw new BookingError("Bạn không có quyền xem booking này", 403);
+  }
+
+  const settings = await getAppSettings();
+  const now = new Date();
+  const transferContent = getPaymentCode(booking.id);
+  const bankConfigured = Boolean(settings.bank_bin && settings.bank_account_no);
+
+  // Chỉ phát QR khi booking còn giữ chỗ hợp lệ và có tiền cọc cần thu
+  const awaitingPayment =
+    booking.status === "pending" && (!booking.expiresAt || booking.expiresAt >= now);
+  const qrPayload =
+    awaitingPayment && bankConfigured && booking.deposit > 0
+      ? buildVietQrPayload({
+          bin: settings.bank_bin,
+          accountNo: settings.bank_account_no,
+          amount: booking.deposit,
+          content: transferContent,
+        })
+      : null;
+
+  const refundPaid = booking.payments.some((p) => p.status === "refunded");
+  const refundHeld = booking.payments.some((p) => p.status === "completed");
+
+  return {
+    bookingId: booking.id,
+    status: booking.status,
+    totalAmount: booking.totalAmount,
+    deposit: booking.deposit,
+    remainingAtVenue: Math.max(booking.totalAmount - booking.deposit, 0),
+    expiresAt: booking.expiresAt,
+    awaitingPayment,
+    transferContent,
+    bankConfigured,
+    bank: bankConfigured
+      ? {
+          bin: settings.bank_bin,
+          accountNo: settings.bank_account_no,
+          accountName: settings.bank_account_name,
+        }
+      : null,
+    qrPayload,
+    payments: booking.payments,
+    refund: {
+      amount: booking.refundAmount,
+      due: booking.status === "cancelled" && booking.refundAmount > 0 && refundHeld,
+      paid: refundPaid,
+    },
+  };
+}
+
+// ─── API: Đánh dấu đã hoàn cọc (owner) ──────────────
+
+export async function markRefunded(bookingId: string) {
+  const booking = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    select: { status: true, refundAmount: true },
+  });
+
+  if (!booking) {
+    throw new BookingError("Không tìm thấy booking", 404);
+  }
+  if (booking.status !== "cancelled" || booking.refundAmount <= 0) {
+    throw new BookingError("Booking này không có khoản cọc nào cần hoàn", 400);
+  }
+
+  const { count } = await prisma.payment.updateMany({
+    where: { bookingId, status: "completed" },
+    data: { status: "refunded" },
+  });
+  if (count === 0) {
+    throw new BookingError("Khoản cọc của booking này đã được hoàn trước đó", 409);
+  }
+
+  const updated = await prisma.booking.findUniqueOrThrow({
+    where: { id: bookingId },
+    include: { payments: PAYMENT_SELECT },
+  });
+  return withPaymentCode(updated);
 }
 
 // ─── API: Danh sách booking ──────────────────────────
@@ -430,7 +612,7 @@ export async function listBookings(userId: string, userRole: string) {
     where.userId = userId;
   }
 
-  return prisma.booking.findMany({
+  const bookings = await prisma.booking.findMany({
     where,
     orderBy: { startsAt: "desc" },
     include: {
@@ -442,8 +624,10 @@ export async function listBookings(userId: string, userRole: string) {
       user: {
         select: { id: true, name: true, email: true, phone: true },
       },
+      payments: PAYMENT_SELECT,
     },
   });
+  return bookings.map(withPaymentCode);
 }
 
 // ─── API: Chi tiết booking ──────────────────────────
@@ -464,6 +648,7 @@ export async function getBookingById(
       user: {
         select: { id: true, name: true, email: true, phone: true },
       },
+      payments: PAYMENT_SELECT,
     },
   });
 
@@ -476,5 +661,5 @@ export async function getBookingById(
     throw new BookingError("Bạn không có quyền xem booking này", 403);
   }
 
-  return booking;
+  return withPaymentCode(booking);
 }

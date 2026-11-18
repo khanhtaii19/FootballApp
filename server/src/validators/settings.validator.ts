@@ -49,6 +49,26 @@ export const updateSettingsSchema = z
       .min(0, "Số giờ hủy không được âm")
       .max(168, "Số giờ hủy tối đa 168 (7 ngày)")
       .optional(),
+    deposit_percent: z.coerce
+      .number()
+      .int("Phần trăm cọc phải là số nguyên")
+      .min(1, "Tiền cọc tối thiểu 1%")
+      .max(100, "Tiền cọc tối đa 100%")
+      .optional(),
+    bank_bin: z
+      .string()
+      .regex(/^\d{6}$/, "Mã BIN ngân hàng gồm đúng 6 chữ số")
+      .optional(),
+    bank_account_no: z
+      .string()
+      .regex(/^\d{6,19}$/, "Số tài khoản gồm 6–19 chữ số")
+      .optional(),
+    bank_account_name: z
+      .string()
+      .trim()
+      .min(1, "Tên chủ tài khoản không được để trống")
+      .max(50, "Tên chủ tài khoản tối đa 50 ký tự")
+      .optional(),
   })
   .superRefine((data, ctx) => {
     if (data.opening_hour && data.closing_hour) {

@@ -36,3 +36,26 @@ export type CreateBookingInput = z.infer<typeof createBookingSchema>;
 export const bookingIdParamSchema = z.object({
   id: z.string().min(1, "Booking ID không được để trống"),
 });
+
+// ─── Xác nhận đã nhận cọc (owner) ────────────────────
+
+export const confirmBookingSchema = z.object({
+  amount: z
+    .number({ invalid_type_error: "Số tiền phải là số" })
+    .int("Số tiền phải là số nguyên")
+    .positive("Số tiền phải lớn hơn 0")
+    .optional(),
+  method: z
+    .enum(["bank_transfer", "cash"], {
+      errorMap: () => ({ message: "Hình thức phải là 'bank_transfer' hoặc 'cash'" }),
+    })
+    .optional(),
+  transactionId: z
+    .string()
+    .trim()
+    .min(1)
+    .max(100, "Mã giao dịch tối đa 100 ký tự")
+    .optional(),
+});
+
+export type ConfirmBookingBody = z.infer<typeof confirmBookingSchema>;
