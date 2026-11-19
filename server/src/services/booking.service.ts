@@ -15,6 +15,7 @@ import {
 } from "../lib/time-utils.js";
 import type {
   AvailableSlotsQuery,
+  ListBookingsQuery,
   CreateBookingInput,
 } from "../validators/booking.validator.js";
 
@@ -602,10 +603,22 @@ export async function markRefunded(bookingId: string) {
 
 // ─── API: Danh sách booking ──────────────────────────
 
-export async function listBookings(userId: string, userRole: string) {
+export async function listBookings(
+  userId: string,
+  userRole: string,
+  query: ListBookingsQuery = {}
+) {
   const where: Prisma.BookingWhereInput = {
     fieldType: { not: "block" }, // Ẩn block khỏi danh sách booking
   };
+
+  // Lọc theo ngày (giờ Việt Nam): lấy booking chạm vào ngày đó
+  if (query.date) {
+    const dayStart = vietnamToUtc(query.date, "00:00");
+    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000); // Việt Nam không có giờ mùa hè
+    where.startsAt = { lt: dayEnd };
+    where.endsAt = { gt: dayStart };
+  }
 
   // Customer chỉ thấy booking của mình
   if (userRole === "customer") {

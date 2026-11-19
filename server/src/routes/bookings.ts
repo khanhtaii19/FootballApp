@@ -5,6 +5,7 @@ import {
   availableSlotsQuerySchema,
   createBookingSchema,
   confirmBookingSchema,
+  listBookingsQuerySchema,
 } from "../validators/booking.validator.js";
 import * as bookingService from "../services/booking.service.js";
 import { BookingError } from "../services/booking.service.js";
@@ -71,7 +72,23 @@ router.post(
 
 router.get("/bookings", authenticate, async (req: Request, res: Response) => {
   try {
-    const bookings = await bookingService.listBookings(req.user!.userId, req.user!.role);
+    const parsed = listBookingsQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({
+        error: "Tham số không hợp lệ",
+        details: parsed.error.errors.map((e) => ({
+          field: e.path.join("."),
+          message: e.message,
+        })),
+      });
+      return;
+    }
+
+    const bookings = await bookingService.listBookings(
+      req.user!.userId,
+      req.user!.role,
+      parsed.data
+    );
     res.json({ bookings });
   } catch (error) {
     handleBookingError(error, res);

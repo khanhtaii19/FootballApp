@@ -2,7 +2,10 @@ import { describe, it, expect } from "vitest";
 import { buildVietQrPayload, crc16, parseTlv, verifyVietQrCrc } from "../lib/vietqr.js";
 import { calculateDeposit, evaluateRefund, getPaymentCode } from "../lib/payment.js";
 import { updateSettingsSchema } from "../validators/settings.validator.js";
-import { confirmBookingSchema } from "../validators/booking.validator.js";
+import {
+  confirmBookingSchema,
+  listBookingsQuerySchema,
+} from "../validators/booking.validator.js";
 
 describe("crc16 (CCITT-FALSE)", () => {
   it("matches the standard check value for '123456789'", () => {
@@ -220,5 +223,23 @@ describe("confirm booking validator", () => {
     ["empty transaction id", { transactionId: "  " }],
   ])("rejects %s", (_name, body) => {
     expect(confirmBookingSchema.safeParse(body).success).toBe(false);
+  });
+});
+
+describe("list bookings query validator", () => {
+  it("accepts no filter or a real date", () => {
+    expect(listBookingsQuerySchema.safeParse({}).success).toBe(true);
+    expect(listBookingsQuerySchema.safeParse({ date: "2030-01-31" }).success).toBe(true);
+    expect(listBookingsQuerySchema.safeParse({ date: "2028-02-29" }).success).toBe(true); // năm nhuận
+  });
+
+  it.each([
+    ["wrong format", "01/01/2030"],
+    ["impossible day", "2030-02-31"],
+    ["month 13", "2030-13-01"],
+    ["non leap year", "2029-02-29"],
+    ["empty", ""],
+  ])("rejects %s", (_name, date) => {
+    expect(listBookingsQuerySchema.safeParse({ date }).success).toBe(false);
   });
 });

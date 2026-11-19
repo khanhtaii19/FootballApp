@@ -764,4 +764,38 @@ describeDb("Booking Integration Tests", () => {
       .set("Authorization", `Bearer ${ownerToken}`)
       .expect(400);
   });
+
+  // ─── Lọc danh sách booking theo ngày ──────────────
+
+  it("List: ?date= returns only the bookings that touch that day", async () => {
+    const dayA = await bookAs(customerToken, "five", futureUtc(17, "18:00")).expect(201);
+    const dayB = await bookAs(customerToken, "five", futureUtc(18, "18:00")).expect(201);
+
+    const list = (token: string, query: string) =>
+      request(app).get(`/api/bookings${query}`).set("Authorization", `Bearer ${token}`);
+
+    const onlyA = await list(ownerToken, `?date=${futureDate(17)}`).expect(200);
+    expect(onlyA.body.bookings.map((b: { id: string }) => b.id)).toEqual([
+      dayA.body.booking.id,
+    ]);
+
+    const onlyB = await list(customerToken, `?date=${futureDate(18)}`).expect(200);
+    expect(onlyB.body.bookings.map((b: { id: string }) => b.id)).toEqual([
+      dayB.body.booking.id,
+    ]);
+
+    const none = await list(ownerToken, `?date=${futureDate(19)}`).expect(200);
+    expect(none.body.bookings).toHaveLength(0);
+
+    // Không có tham số: trả tất cả
+    const all = await list(ownerToken, "").expect(200);
+    expect(all.body.bookings).toHaveLength(2);
+  });
+
+  it("List: rejects an impossible date with 400", async () => {
+    await request(app)
+      .get("/api/bookings?date=2030-02-31")
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .expect(400);
+  });
 });
