@@ -1,0 +1,11 @@
+# Context gốc dùng để build image web (deploy/web.Dockerfile)
+.git
+.github
+**/node_modules
+**/dist
+**/coverage
+**/.env
+**/.env.*
+server
+backups
+docs

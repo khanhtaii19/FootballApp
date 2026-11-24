@@ -1,0 +1,71 @@
+# Production: PostgreSQL + server + web (Caddy, HTTPS tự động).
+# Hướng dẫn đầy đủ: docs/DEPLOY.md
+#
+#   cp deploy/.env.production.example .env   # rồi điền giá trị thật
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Chỉ cổng 80/443 của web được mở ra ngoài; database và server nằm trong mạng nội bộ.
+name: sanbong
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sanbong
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Đặt POSTGRES_PASSWORD trong file .env}
+      POSTGRES_DB: sanbong
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sanbong -d sanbong"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: ./server
+      target: runner
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://sanbong:${POSTGRES_PASSWORD}@db:5432/sanbong?schema=public
+      # Giao diện và API cùng một domain (Caddy proxy /api) nên KHÔNG cần CORS.
+      # Chỉ đặt CLIENT_URL nếu bạn phục vụ giao diện từ domain khác.
+      CLIENT_URL: ${CLIENT_URL:-}
+      TRUST_PROXY: 1
+      JWT_SECRET: ${JWT_SECRET:?Đặt JWT_SECRET trong file .env}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?Đặt JWT_REFRESH_SECRET trong file .env}
+      SEED_OWNER_EMAIL: ${SEED_OWNER_EMAIL:-}
+      SEED_OWNER_PASSWORD: ${SEED_OWNER_PASSWORD:-}
+      MAX_PENDING_BOOKINGS_PER_USER: ${MAX_PENDING_BOOKINGS_PER_USER:-3}
+      EXPIRY_JOB_INTERVAL_SECONDS: ${EXPIRY_JOB_INTERVAL_SECONDS:-60}
+    expose:
+      - "3000"
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      DOMAIN: ${DOMAIN:?Đặt DOMAIN trong file .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data # chứng chỉ HTTPS, mất volume này sẽ phải xin lại
+      - caddy_config:/config
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

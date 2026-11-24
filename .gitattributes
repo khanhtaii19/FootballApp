@@ -1,0 +1,8 @@
+# Các file này chạy trong container/máy chủ Linux: luôn dùng LF kể cả khi checkout trên Windows
+# (CRLF làm hỏng script với lỗi "bad interpreter: /bin/sh^M").
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+*.Dockerfile text eol=lf
+Caddyfile   text eol=lf
+*.yml       text eol=lf
+.dockerignore text eol=lf
