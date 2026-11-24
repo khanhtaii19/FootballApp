@@ -62,6 +62,11 @@ npm run dev
 ```
 lastproject/
 ├── client/              # React + TypeScript (Vite)
+│   └── src/
+│       ├── pages/       # Trang của khách; pages/owner/ là trang chủ sân
+│       ├── components/  # Layout, PaymentQr (QR + đếm ngược), OwnerActions...
+│       ├── lib/         # api (tự làm mới token), session, format, schedule...
+│       └── test/        # Tiện ích test (Vitest + Testing Library)
 ├── server/              # Express + TypeScript
 │   ├── prisma/          # Schema & migrations
 │   │   ├── schema.prisma
@@ -87,6 +92,21 @@ lastproject/
 
 Giao diện cấu hình (Phần 3): chạy client, đăng nhập chủ sân → chỉnh giá/giờ mở cửa → **Lưu cấu hình**.
 
+### Giao diện (Phần 6)
+
+Client gọi API qua `VITE_API_URL` (mặc định `http://localhost:3000/api`).
+
+| Đường dẫn | Ai dùng | Chức năng |
+|---|---|---|
+| `/book` | Mọi người | Chọn ngày, loại sân, thời lượng, giờ trống; xem giá và tiền cọc; đặt sân |
+| `/bookings/:id/pay` | Khách | QR chuyển khoản, đồng hồ đếm ngược giữ chỗ, tự cập nhật khi chủ sân xác nhận |
+| `/my-bookings` | Khách | Lịch sắp tới và lịch sử, hủy booking (hiển thị kết quả hoàn cọc) |
+| `/owner` | Chủ sân | **Lịch tổng** dạng lưới 6 vùng theo ngày, thống kê trong ngày, khóa sân |
+| `/owner/bookings` | Chủ sân | Chờ xác nhận, cần hoàn cọc, tìm theo mã chuyển khoản/tên/SĐT |
+| `/owner/settings` | Chủ sân | Giá, giờ hoạt động, tiền cọc, chính sách hủy, tài khoản ngân hàng nhận cọc |
+
+Kiểm tra client: `cd client && npm run lint && npm run build && npm test`.
+
 ### API Phần 3 (tóm tắt)
 
 | Method | Path | Quyền | Mô tả |
@@ -102,6 +122,7 @@ Luồng: khách đặt sân (giữ chỗ tạm) → xem QR chuyển khoản → 
 
 | Method | Endpoint | Quyền | Mô tả |
 |---|---|---|---|
+| GET | `/api/bookings?date=YYYY-MM-DD` | Đăng nhập | Danh sách booking (chủ sân thấy tất cả, khách thấy của mình); lọc theo ngày giờ VN |
 | GET | `/api/bookings/:id/payment` | Chủ booking / Owner | Tiền cọc, nội dung chuyển khoản, chuỗi QR VietQR (`qrPayload`), thông tin hoàn cọc |
 | PATCH | `/api/bookings/:id/confirm` | Owner | Xác nhận đã nhận cọc. Body tùy chọn: `amount`, `method` (`bank_transfer`/`cash`), `transactionId` |
 | PATCH | `/api/bookings/:id/cancel` | Chủ booking / Owner | Hủy; trả thêm `refund` (có hoàn cọc không, bao nhiêu, lý do) |
@@ -145,6 +166,6 @@ npm run dev
 - [x] Phần 3: Quản lý sân, giá, cấu hình
 - [x] Phần 4: Lõi đặt sân và chống trùng ⭐
 - [x] Phần 5: Giữ chỗ tạm, đặt cọc, hủy (tự hết hạn pending, giới hạn pending, QR VietQR + tiền cọc, hoàn cọc theo chính sách hủy; thanh toán tự động qua PayOS/webhook: chưa làm)
-- [ ] Phần 6: Giao diện React
+- [x] Phần 6: Giao diện React (đặt sân + thanh toán QR cho khách, lịch tổng + xử lý booking + cấu hình cho chủ sân)
 - [ ] Phần 7: Đặt cố định hàng tuần
 - [ ] Phần 8: Deploy & production

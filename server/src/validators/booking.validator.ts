@@ -59,3 +59,21 @@ export const confirmBookingSchema = z.object({
 });
 
 export type ConfirmBookingBody = z.infer<typeof confirmBookingSchema>;
+
+// ─── Danh sách booking (lọc theo ngày) ───────────────
+
+/** "YYYY-MM-DD" và phải là ngày có thật (không nhận 2030-02-31). */
+function isRealDate(value: string): boolean {
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+export const listBookingsQuerySchema = z.object({
+  date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "date phải có dạng YYYY-MM-DD")
+    .refine(isRealDate, "date không phải ngày hợp lệ")
+    .optional(),
+});
+
+export type ListBookingsQuery = z.infer<typeof listBookingsQuerySchema>;

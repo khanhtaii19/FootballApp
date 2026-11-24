@@ -40,6 +40,35 @@ jobs:
         working-directory: server
         run: npm run format:check
 
+  # ─── Client (lint, build, test) ────────────────────
+  client:
+    name: Client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install client dependencies
+        working-directory: client
+        run: npm ci
+
+      - name: Lint
+        working-directory: client
+        run: npm run lint
+
+      - name: Build (type check + bundle)
+        working-directory: client
+        run: npm run build
+
+      - name: Run tests
+        working-directory: client
+        run: npm test
+
   # ─── Tests ──────────────────────────────────────────
   test:
     name: Tests
