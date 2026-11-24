@@ -30,3 +30,6 @@ server/prisma/*.db
 
 # Docker
 .docker/
+
+# Bản sao lưu database
+backups/

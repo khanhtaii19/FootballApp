@@ -1,163 +1,204 @@
 # ⚽ Hệ Thống Đặt Sân Bóng
 
-Hệ thống đặt sân bóng đá mini online — fullstack project với mô hình "6 vùng" chống trùng lịch.
+[![CI](https://github.com/khanhtaii19/FootballApp/actions/workflows/ci.yml/badge.svg)](https://github.com/khanhtaii19/FootballApp/actions/workflows/ci.yml)
 
-## 🏗 Kiến trúc
+Ứng dụng web đặt sân bóng đá mini cho một cụm sân (2 sân 7, mỗi sân 7 tách được thành 3 sân 5):
+khách xem giờ trống, đặt sân, chuyển khoản tiền cọc bằng mã **VietQR**; chủ sân quản lý bằng **lịch tổng** và xác nhận cọc.
 
-```
-┌─────────────┐      ┌──────────────┐      ┌──────────────┐
-│   Client    │ ───► │   Server     │ ───► │  PostgreSQL  │
-│  React+Vite │      │ Express+TS   │      │   + Prisma   │
-│  Port 5173  │      │   Port 3000  │      │   Port 5432  │
-└─────────────┘      └──────────────┘      └──────────────┘
-```
+Dự án tập trung vào các bài toán thật của một hệ thống đặt chỗ: **không bao giờ đặt trùng** kể cả khi nhiều người bấm cùng lúc,
+giữ chỗ tạm có hạn, tiền cọc và hoàn cọc, và triển khai an toàn lên máy chủ thật.
 
-## 🎯 Mô hình "6 vùng"
+> 🔗 **Demo:** chưa deploy. Hướng dẫn triển khai từng bước tại [docs/DEPLOY.md](docs/DEPLOY.md).
 
-Mỗi cụm sân có 2 mặt cỏ, mỗi mặt 3 vùng:
+## ✨ Điểm nhấn kỹ thuật
+
+**1. Mô hình "6 vùng" biến bài toán sân ghép thành một quy tắc duy nhất.**
+Mỗi mặt cỏ chia 3 vùng; sân 5 chiếm 1 vùng, sân 7 chiếm cả 3. Hai booking xung đột khi **dùng chung ít nhất một vùng và thời gian chồng nhau**.
+Không có chuỗi `if/else` cho từng tổ hợp sân 5/sân 7.
 
 ```
 Sân 7 số 1:  [ A1 | A2 | A3 ]
 Sân 7 số 2:  [ B1 | B2 | B3 ]
 ```
 
-- **Sân 5** = chiếm **1 vùng**
-- **Sân 7** = chiếm **cả 3 vùng** của một mặt cỏ
-- **Xung đột** = chung vùng + thời gian chồng nhau
-- **Chống race condition** = PostgreSQL exclusion constraint ở tầng database
+**2. Chống trùng lịch ở tầng database, không chỉ trong code.**
+Kiểm tra "còn trống thì thêm" bằng code có race condition: hai request cùng thấy trống rồi cùng thêm.
+Giải pháp: *exclusion constraint* của PostgreSQL (`EXCLUDE USING gist (zone_id WITH =, tstzrange(starts_at, ends_at) WITH &&)`) làm chốt chặn cuối;
+tạo booking còn lấy một *advisory lock* để các giao dịch xếp hàng thay vì tranh nhau khóa. Prisma không hỗ trợ constraint này nên nó nằm trong migration SQL thuần.
 
-## 🚀 Chạy nhanh
+**3. Một lỗi đồng thời có thật đã được tìm ra và chứng minh bằng số liệu.**
+Khi nhiều request cùng chọn một vùng rảnh, chỉ một request thắng constraint, số còn lại bị từ chối oan dù vùng khác vẫn trống.
+Mô phỏng trên PostgreSQL thật: 8 request sân 5 cùng giờ chỉ thành công **3/8** với logic ban đầu và **6/8** (đúng bằng số vùng) sau khi thử lại với vùng khác.
+Test đồng thời chạy trong CI.
 
-### Cách 1: Docker Compose (khuyến nghị)
+**4. Giữ chỗ tạm không bao giờ "chết" chặn người khác.**
+Booking `pending` có hạn thanh toán. Job nền nhả chỗ mỗi phút, và việc dọn cũng chạy ngay khi có người đặt hoặc xem giờ trống,
+nên khoảng trễ của job không làm khách mất giờ. Xác nhận cọc là một câu lệnh nguyên tử, từ chối booking đã quá hạn.
 
-```bash
-docker compose up -d
+**5. Thanh toán QR tự viết, đối chiếu độc lập.**
+Chuỗi VietQR (EMVCo/NAPAS) được tạo trong [`server/src/lib/vietqr.ts`](server/src/lib/vietqr.ts) kèm CRC-16/CCITT;
+đã kiểm tra khớp giá trị chuẩn và khớp một cài đặt CRC độc lập bằng Python. Giao diện vẽ QR kèm đồng hồ đếm ngược và **tự cập nhật** khi chủ sân xác nhận.
+Tiền cọc, chính sách hoàn cọc (hủy trước X giờ, chủ sân hủy thì luôn hoàn) được lưu và kiểm thử.
+
+**6. Sẵn sàng cho production, kiểm tra bằng CI thật.**
+Server **từ chối khởi động** nếu cấu hình production thiếu hoặc yếu (secret mẫu, trùng nhau, quá ngắn...); không có tài khoản demo công khai ở production.
+Docker image chạy bằng user thường; Caddy tự cấp HTTPS và đặt header bảo mật. CI dựng nguyên stack production rồi chạy smoke test từ bên ngoài
+(đăng nhập, đặt sân, mã QR, sao lưu rồi khôi phục).
+
+## 🏗 Kiến trúc
+
+```mermaid
+flowchart LR
+    Browser["Trình duyệt<br/>React + TypeScript"] -->|HTTPS| Caddy
+    subgraph Docker["Docker Compose (production)"]
+        Caddy["Caddy<br/>HTTPS tự động · giao diện tĩnh"] -->|/api/*| Server["Server<br/>Express + TypeScript"]
+        Server --> DB[("PostgreSQL<br/>exclusion constraint")]
+        Server -. job mỗi phút .-> Expire["Nhả booking<br/>quá hạn thanh toán"]
+    end
 ```
 
-Backend: http://localhost:3000  
-Frontend: http://localhost:5173
+Luồng đặt sân:
 
-### Cách 2: Chạy local
+```mermaid
+sequenceDiagram
+    participant K as Khách
+    participant S as Server
+    participant D as PostgreSQL
+    participant C as Chủ sân
+    K->>S: Đặt sân (ngày, loại sân, giờ)
+    S->>D: Lấy khóa, dọn booking quá hạn, chọn vùng, ghi booking pending
+    D-->>S: OK hoặc vi phạm no_overlap (thử lại vùng khác)
+    S-->>K: Booking + thông tin QR (VietQR, đếm ngược)
+    K->>K: Quét QR, chuyển khoản tiền cọc
+    C->>S: Xác nhận đã nhận cọc (đối chiếu mã SBxxxxxxxx)
+    S->>D: Ghi payment + đổi sang confirmed (một transaction)
+    S-->>K: Trang thanh toán tự cập nhật: "Đã xác nhận"
+```
+
+## 🚀 Chạy trên máy (dev)
+
+Cần Docker và Node.js 22.
 
 ```bash
-# Terminal 1 — Database
-docker compose up db -d
+# 1. Database + server (tự chạy migration và nạp dữ liệu mẫu)
+docker compose up -d
 
-# Terminal 2 — Server
-cd server
-cp .env.example .env
-npm install
-npx prisma migrate dev
-npm run db:seed
-npm run dev
-
-# Terminal 3 — Client
+# 2. Giao diện
 cd client
 npm install
 npm run dev
 ```
 
+- Giao diện: http://localhost:5173 · API: http://localhost:3000/api · Health: http://localhost:3000/api/health
+- Tài khoản demo (chỉ ở môi trường dev): chủ sân `owner@sanbong.vn` / `OwnerPass123`. Khách tự đăng ký trên giao diện.
+
+Chạy server không qua Docker:
+
+```bash
+docker compose up db -d
+cd server
+cp .env.example .env          # DATABASE_URL trỏ tới cổng 5433 của compose
+npm install
+npx prisma migrate dev
+npm run db:seed
+npm run dev
+```
+
+## 🧪 Kiểm thử
+
+```bash
+# Server: unit test không cần database; integration test cần PostgreSQL (DATABASE_URL tới DB có chữ "test")
+cd server
+cp .env.test.example .env.test    # và tạo database sanbong_test
+npm test
+
+# Client: lint, build (kiểm tra kiểu) và test
+cd client
+npm run lint && npm run build && npm test
+```
+
+Test tự từ chối chạy trên database không có chữ "test" (vì chúng xóa dữ liệu).
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) chạy: lint và kiểm tra kiểu, test server với PostgreSQL thật (gồm kiểm thử đồng thời),
+test client, và job **Production stack** dựng nguyên stack Docker để chạy [`deploy/smoke-test.sh`](deploy/smoke-test.sh).
+
+## 🌐 Triển khai
+
+Hướng dẫn đầy đủ (VPS, tên miền, HTTPS, sao lưu, khôi phục, đổi mật khẩu chủ sân, giám sát): **[docs/DEPLOY.md](docs/DEPLOY.md)**.
+
+```bash
+cp deploy/.env.production.example .env    # điền domain, mật khẩu, khóa bí mật
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
 ## 📁 Cấu trúc dự án
 
 ```
-lastproject/
-├── client/              # React + TypeScript (Vite)
+├── client/                  # React + TypeScript (Vite)
 │   └── src/
-│       ├── pages/       # Trang của khách; pages/owner/ là trang chủ sân
-│       ├── components/  # Layout, PaymentQr (QR + đếm ngược), OwnerActions...
-│       ├── lib/         # api (tự làm mới token), session, format, schedule...
-│       └── test/        # Tiện ích test (Vitest + Testing Library)
-├── server/              # Express + TypeScript
-│   ├── prisma/          # Schema & migrations
-│   │   ├── schema.prisma
-│   │   ├── seed.ts
-│   │   └── migrations/
+│       ├── pages/           # Trang của khách; pages/owner/ là trang chủ sân
+│       ├── components/      # Layout, PaymentQr (QR + đếm ngược), OwnerActions...
+│       └── lib/             # api (tự làm mới token), format, schedule, countdown...
+├── server/                  # Express + TypeScript
+│   ├── prisma/              # schema, migrations (gồm exclusion constraint)
 │   └── src/
-│       ├── index.ts     # Entry point
-│       ├── app.ts       # Express app
-│       ├── lib/         # Prisma client, utils
-│       ├── routes/      # API routes
-│       ├── middleware/   # Auth, validation
-│       └── tests/       # Vitest tests
-├── docker-compose.yml
-├── .github/workflows/ci.yml
-└── README.md
+│       ├── routes/          # auth, bookings, blocks, settings, zones, health
+│       ├── services/        # nghiệp vụ: đặt sân, hết hạn, thanh toán, block
+│       ├── lib/             # env (fail-fast), vietqr, payment, time-utils, db-locks
+│       ├── middleware/      # auth, validate, rate-limit, request-logger
+│       ├── jobs/            # nhả booking quá hạn
+│       ├── scripts/         # seed, đặt lại mật khẩu chủ sân (chạy được trong image production)
+│       └── tests/
+├── deploy/                  # Caddyfile, web.Dockerfile, backup/restore/smoke-test, .env mẫu
+├── docs/                    # DEPLOY.md, kế hoạch dự án
+├── docker-compose.yml       # dev: database + server
+└── docker-compose.prod.yml  # production: database + server + Caddy
 ```
 
-## 🔐 Tài khoản demo (sau `npm run db:seed`)
-
-| Vai trò | Email | Mật khẩu |
-|---------|-------|----------|
-| Chủ sân | `owner@sanbong.vn` | `OwnerPass123` |
-
-Giao diện cấu hình (Phần 3): chạy client, đăng nhập chủ sân → chỉnh giá/giờ mở cửa → **Lưu cấu hình**.
-
-### Giao diện (Phần 6)
-
-Client gọi API qua `VITE_API_URL` (mặc định `http://localhost:3000/api`).
-
-| Đường dẫn | Ai dùng | Chức năng |
-|---|---|---|
-| `/book` | Mọi người | Chọn ngày, loại sân, thời lượng, giờ trống; xem giá và tiền cọc; đặt sân |
-| `/bookings/:id/pay` | Khách | QR chuyển khoản, đồng hồ đếm ngược giữ chỗ, tự cập nhật khi chủ sân xác nhận |
-| `/my-bookings` | Khách | Lịch sắp tới và lịch sử, hủy booking (hiển thị kết quả hoàn cọc) |
-| `/owner` | Chủ sân | **Lịch tổng** dạng lưới 6 vùng theo ngày, thống kê trong ngày, khóa sân |
-| `/owner/bookings` | Chủ sân | Chờ xác nhận, cần hoàn cọc, tìm theo mã chuyển khoản/tên/SĐT |
-| `/owner/settings` | Chủ sân | Giá, giờ hoạt động, tiền cọc, chính sách hủy, tài khoản ngân hàng nhận cọc |
-
-Kiểm tra client: `cd client && npm run lint && npm run build && npm test`.
-
-### API Phần 3 (tóm tắt)
-
-| Method | Path | Quyền | Mô tả |
-|--------|------|-------|--------|
-| GET | `/api/settings` | Công khai | Đọc cấu hình |
-| PUT | `/api/settings` | Owner | Cập nhật cấu hình |
-| GET | `/api/zones` | Công khai | 6 vùng A1–B3 |
-| GET/POST/DELETE | `/api/blocks` | Owner | Khóa vùng (bảo trì) |
-
-### API Phần 5: thanh toán và đặt cọc (tóm tắt)
-
-Luồng: khách đặt sân (giữ chỗ tạm) → xem QR chuyển khoản → chủ sân đối chiếu sao kê và xác nhận đã nhận cọc.
+## 🔌 API (tóm tắt)
 
 | Method | Endpoint | Quyền | Mô tả |
 |---|---|---|---|
-| GET | `/api/bookings?date=YYYY-MM-DD` | Đăng nhập | Danh sách booking (chủ sân thấy tất cả, khách thấy của mình); lọc theo ngày giờ VN |
-| GET | `/api/bookings/:id/payment` | Chủ booking / Owner | Tiền cọc, nội dung chuyển khoản, chuỗi QR VietQR (`qrPayload`), thông tin hoàn cọc |
-| PATCH | `/api/bookings/:id/confirm` | Owner | Xác nhận đã nhận cọc. Body tùy chọn: `amount`, `method` (`bank_transfer`/`cash`), `transactionId` |
-| PATCH | `/api/bookings/:id/cancel` | Chủ booking / Owner | Hủy; trả thêm `refund` (có hoàn cọc không, bao nhiêu, lý do) |
-| PATCH | `/api/bookings/:id/refund` | Owner | Đánh dấu đã hoàn cọc cho khách |
+| POST | `/api/auth/register` · `/login` · `/refresh` | Công khai | Tài khoản (đăng nhập sai quá 10 lần/15 phút bị khóa tạm theo IP) |
+| GET | `/api/settings` · `/api/zones` | Công khai | Cấu hình, 6 vùng sân |
+| PUT | `/api/settings` | Owner | Giá, giờ, cọc, chính sách hủy, tài khoản ngân hàng |
+| GET | `/api/bookings/available` | Công khai | Giờ trống theo ngày, loại sân, thời lượng |
+| POST | `/api/bookings` | Đăng nhập | Đặt sân (giữ chỗ tạm) |
+| GET | `/api/bookings?date=YYYY-MM-DD` | Đăng nhập | Danh sách (chủ sân thấy tất cả, khách thấy của mình) |
+| GET | `/api/bookings/:id/payment` | Chủ booking / Owner | Tiền cọc, nội dung chuyển khoản, chuỗi QR VietQR |
+| PATCH | `/api/bookings/:id/confirm` | Owner | Xác nhận đã nhận cọc |
+| PATCH | `/api/bookings/:id/cancel` | Chủ booking / Owner | Hủy, trả kết quả hoàn cọc |
+| PATCH | `/api/bookings/:id/refund` | Owner | Ghi nhận đã hoàn cọc |
+| GET/POST/DELETE | `/api/blocks` | Owner | Khóa vùng (bảo trì) |
+| GET | `/api/health` | Công khai | Tình trạng server và database |
 
-- **Tiền cọc** = `deposit_percent`% tổng tiền (mặc định 30%), làm tròn lên 1.000đ, chụp vào booking lúc đặt.
-- **Chính sách hoàn cọc:** khách hủy trước giờ đá ít nhất `cancel_before_hours` giờ thì được hoàn đủ cọc, hủy sát giờ thì mất cọc; chủ sân hủy thì luôn hoàn.
-- **Cấu hình ngân hàng** (Owner, `PUT /api/settings`): `bank_bin` (6 số), `bank_account_no`, `bank_account_name`. Chưa cấu hình thì API không trả `qrPayload`.
-- **Mã nội dung chuyển khoản** (`SB` + 8 ký tự, ví dụ `SBH3IJ4K5L`) có trong mọi booking để chủ sân đối chiếu sao kê.
-- Client chỉ cần vẽ `qrPayload` thành ảnh QR (ví dụ bằng `qrcode.react`); khách quét bằng app ngân hàng bất kỳ, số tiền và nội dung được điền sẵn.
+## 🖥 Giao diện
 
-## 🧪 Testing
+| Đường dẫn | Ai dùng | Chức năng |
+|---|---|---|
+| `/book` | Mọi người | Chọn ngày, loại sân, thời lượng, giờ trống; xem giá và tiền cọc |
+| `/bookings/:id/pay` | Khách | QR chuyển khoản, đếm ngược giữ chỗ, tự cập nhật khi chủ sân xác nhận |
+| `/my-bookings` | Khách | Lịch sắp tới/lịch sử, hủy và xem kết quả hoàn cọc |
+| `/owner` | Chủ sân | **Lịch tổng** lưới 6 vùng theo ngày, thống kê, khóa sân |
+| `/owner/bookings` | Chủ sân | Chờ xác nhận, cần hoàn cọc, tìm theo mã chuyển khoản/tên/SĐT |
+| `/owner/settings` | Chủ sân | Giá, giờ, cọc, chính sách hủy, tài khoản ngân hàng |
 
-```bash
-cd server
-npm test           # Chạy test một lần
-npm run test:watch # Chạy test liên tục
-```
+## ⚠️ Giới hạn đã biết
 
-docker compose up -d db
-cd server
-npm run dev
+- Xác nhận đã nhận cọc do chủ sân bấm tay. Tự động hóa cần PayOS/VietQR kèm webhook (xử lý idempotency).
+- Chưa có email thông báo và đặt cố định hàng tuần.
+- Token lưu ở `localStorage` (rủi ro XSS); hướng nâng cấp là refresh token trong cookie `httpOnly`.
+- Chạy một instance server; bộ giới hạn đăng nhập dùng bộ nhớ (nhiều instance cần Redis).
 
-## 📦 Tech Stack
+## 📦 Công nghệ
 
-| Layer     | Technology                          |
-|-----------|-------------------------------------|
-| Frontend  | React, TypeScript, Vite             |
-| Backend   | Express, TypeScript                 |
-| Database  | PostgreSQL, Prisma ORM              |
-| Auth      | JWT (access + refresh token), bcrypt|
-| Validate  | Zod                                 |
-| Test      | Vitest                              |
-| CI/CD     | GitHub Actions                      |
-| Container | Docker, Docker Compose              |
+| Lớp | Công nghệ |
+|---|---|
+| Giao diện | React 19, TypeScript, Vite, React Router, TanStack Query |
+| Backend | Node.js 22, Express, TypeScript, Zod |
+| Database | PostgreSQL 16, Prisma (kèm migration SQL cho exclusion constraint) |
+| Xác thực | JWT (access + refresh, tự làm mới ở client), bcrypt |
+| Kiểm thử | Vitest, Testing Library, integration test trên PostgreSQL thật |
+| Hạ tầng | Docker, Docker Compose, Caddy (HTTPS tự động), GitHub Actions |
 
 ## 📋 Kế hoạch phát triển
 
@@ -165,7 +206,7 @@ npm run dev
 - [x] Phần 2: Tài khoản và phân quyền
 - [x] Phần 3: Quản lý sân, giá, cấu hình
 - [x] Phần 4: Lõi đặt sân và chống trùng ⭐
-- [x] Phần 5: Giữ chỗ tạm, đặt cọc, hủy (tự hết hạn pending, giới hạn pending, QR VietQR + tiền cọc, hoàn cọc theo chính sách hủy; thanh toán tự động qua PayOS/webhook: chưa làm)
-- [x] Phần 6: Giao diện React (đặt sân + thanh toán QR cho khách, lịch tổng + xử lý booking + cấu hình cho chủ sân)
-- [ ] Phần 7: Đặt cố định hàng tuần
-- [ ] Phần 8: Deploy & production
+- [x] Phần 5: Giữ chỗ tạm, đặt cọc, QR VietQR, hoàn cọc
+- [x] Phần 6: Giao diện React (khách và chủ sân)
+- [ ] Phần 7: Đặt cố định hàng tuần, email thông báo
+- [x] Phần 8: Sẵn sàng production (Docker, HTTPS, sao lưu, smoke test trong CI); còn việc: deploy thật và tìm người dùng thật
