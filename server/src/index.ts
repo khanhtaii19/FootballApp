@@ -2,8 +2,9 @@ import "dotenv/config";
 import app from "./app.js";
 import prisma from "./lib/prisma.js";
 import { startExpiryJob } from "./jobs/expire-bookings.job.js";
+import { env } from "./lib/env.js";
 
-const PORT = process.env.PORT || 3000;
+const PORT = env.PORT;
 
 const server = app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);

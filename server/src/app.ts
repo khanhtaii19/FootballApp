@@ -7,19 +7,26 @@ import { router as settingsRouter } from "./routes/settings.js";
 import { router as zonesRouter } from "./routes/zones.js";
 import { router as blocksRouter } from "./routes/blocks.js";
 import { router as bookingsRouter } from "./routes/bookings.js";
+import { env } from "./lib/env.js";
+import { requestLogger } from "./middleware/request-logger.js";
 
 const app = express();
 
+// Sau reverse proxy (Caddy) phải tin X-Forwarded-For để lấy đúng IP khách (rate limit, log)
+app.set("trust proxy", env.TRUST_PROXY);
+app.disable("x-powered-by");
+
 // ─── Middleware ──────────────────────────────────────
 
+app.use(requestLogger({ enabled: env.LOG_REQUESTS, json: env.isProduction }));
 app.use(helmet());
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "http://localhost:5173",
+    origin: env.CLIENT_ORIGINS,
     credentials: true,
   })
 );
-app.use(express.json());
+app.use(express.json({ limit: "100kb" }));
 
 // ─── Routes ─────────────────────────────────────────
 
@@ -42,7 +49,7 @@ app.use(
     console.error("❌ Unhandled error:", err.message);
     res.status(500).json({
       error: "Internal server error",
-      ...(process.env.NODE_ENV === "development" && { detail: err.message }),
+      ...(env.NODE_ENV === "development" && { detail: err.message }),
     });
   }
 );

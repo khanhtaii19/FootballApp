@@ -27,6 +27,7 @@ function handleAuthError(error: unknown, res: Response) {
 
 router.post(
   "/auth/register",
+  rateLimit({ windowMs: 60 * 60 * 1000, maxAttempts: 20 }), // chống tạo tài khoản hàng loạt
   validate(registerSchema),
   async (req: Request, res: Response) => {
     try {
@@ -45,7 +46,7 @@ router.post(
 
 router.post(
   "/auth/login",
-  rateLimit({ windowMs: 15 * 60 * 1000, maxAttempts: 10 }),
+  rateLimit({ windowMs: 15 * 60 * 1000, maxAttempts: 10, countOnlyFailures: true }),
   validate(loginSchema),
   async (req: Request, res: Response) => {
     try {
