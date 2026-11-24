@@ -126,3 +126,75 @@ jobs:
           NODE_ENV: test
           CI: "true"
         run: npm test
+
+  # ─── Stack production (Docker) ──────────────────────
+  # Dựng đúng stack như khi deploy thật rồi kiểm tra từ bên ngoài.
+  docker:
+    name: Production stack (Docker)
+    runs-on: ubuntu-latest
+    env:
+      COMPOSE: docker compose -f docker-compose.prod.yml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env for the stack
+        run: |
+          {
+            echo "DOMAIN=http://localhost"
+            echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)"
+            echo "JWT_SECRET=$(openssl rand -base64 48 | tr -d '\n')"
+            echo "JWT_REFRESH_SECRET=$(openssl rand -base64 48 | tr -d '\n')"
+            echo "SEED_OWNER_EMAIL=owner@example.com"
+            echo "SEED_OWNER_PASSWORD=CiSmokeTest2026Pass"
+          } > .env
+
+      - name: Validate compose file
+        run: $COMPOSE config -q
+
+      - name: Build and start the stack
+        run: $COMPOSE up -d --build --wait --wait-timeout 240
+
+      - name: Prisma Client is generated inside the production image
+        run: >
+          $COMPOSE exec -T server node -e
+          "const { PrismaClient } = require('@prisma/client'); new PrismaClient(); console.log('Prisma Client OK')"
+
+      - name: Server does not run as root
+        run: test "$($COMPOSE exec -T server id -u)" != "0"
+
+      - name: Smoke test (UI, API, owner login, booking, QR)
+        env:
+          BASE_URL: http://localhost
+          OWNER_EMAIL: owner@example.com
+          OWNER_PASSWORD: CiSmokeTest2026Pass
+          SMOKE_SET_BANK: "yes"
+          SMOKE_CONFIRM: "yes"
+        run: ./deploy/smoke-test.sh
+
+      - name: Server refuses weak production configuration
+        run: |
+          out=$(docker run --rm --entrypoint node -e NODE_ENV=production sanbong-server \
+            -e "require('./dist/lib/env.js')" 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q "JWT_SECRET là bắt buộc"
+
+      - name: Backup and restore round trip
+        run: |
+          count() { $COMPOSE exec -T db psql -U sanbong -d sanbong -tAc "SELECT count(*) FROM bookings" | tr -d '[:space:]'; }
+          before=$(count)
+          test "$before" -ge 1
+          ./deploy/backup.sh
+          $COMPOSE exec -T db psql -U sanbong -d sanbong -c "DELETE FROM payments; DELETE FROM booking_zones; DELETE FROM bookings;"
+          test "$(count)" = "0"
+          ASSUME_YES=yes ./deploy/restore.sh "$(ls -t backups/sanbong-*.sql.gz | head -1)"
+          $COMPOSE up -d --wait --wait-timeout 120
+          test "$(count)" = "$before"
+
+      - name: Show logs when something failed
+        if: failure()
+        run: $COMPOSE logs --no-color --tail=200
+
+      - name: Tear down
+        if: always()
+        run: $COMPOSE down -v
+
